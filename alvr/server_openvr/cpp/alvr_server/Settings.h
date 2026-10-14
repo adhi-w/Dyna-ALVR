@@ -25,12 +25,30 @@ public:
     std::string m_captureFrameDir;
 
     bool m_enableFoveatedEncoding;
+    // 0: Vanilla, 1: D-AADT2, 2: D-AADT3, 3: D-FRW
+    uint32_t m_foveationMethod;
+    // Fine-grained toggles for dynamic ROI features.
+    bool m_enableGazePrediction;
+    bool m_enableGazeHysteresis;
+    bool m_enableDynamicFovealSizing;
+    // Dynamic foveal sizing parameters (normalized [0,1] sizes; [0,1] rates).
+    float m_dynMinSize = 0.2f;
+    float m_dynMaxSize = 0.6f;
+    float m_dynGrowRate = 0.20f;
+    float m_dynShrinkRate = 0.08f;
     float m_foveationCenterSizeX;
     float m_foveationCenterSizeY;
     float m_foveationCenterShiftX;
     float m_foveationCenterShiftY;
+    // Per-eye overrides (normalized [0,1], x:right, y:down). Defaults to the generic values.
+    float m_foveationCenterShiftXLeft;
+    float m_foveationCenterShiftYLeft;
+    float m_foveationCenterShiftXRight;
+    float m_foveationCenterShiftYRight;
     float m_foveationEdgeRatioX;
     float m_foveationEdgeRatioY;
+    // Used only for method 3 (D-FRW)
+    float m_foveationFrwMagnitude;
 
     bool m_enableColorCorrection;
     float m_brightness;

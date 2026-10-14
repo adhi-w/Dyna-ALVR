@@ -74,8 +74,6 @@ impl Control {
         session_fragment: &mut json::Value,
         allow_inline: bool,
     ) -> Option<PathValuePair> {
-        let entries_count = self.entries.len();
-
         let mut request = None;
 
         let collapsed = if self.gui_collapsible {
@@ -102,10 +100,15 @@ impl Control {
         };
 
         if !collapsed {
-            for (i, entry) in self.entries.iter_mut().enumerate() {
-                if entry.hidden {
-                    continue;
-                }
+            let visible_indices: Vec<usize> = self
+                .entries
+                .iter()
+                .enumerate()
+                .filter_map(|(i, e)| (!e.hidden).then_some(i))
+                .collect();
+
+            for (pos, entry_index) in visible_indices.iter().enumerate() {
+                let entry = &mut self.entries[*entry_index];
 
                 ui.horizontal(|ui| {
                     ui.add_space(INDENTATION_STEP * self.nesting_info.indentation_level as f32);
@@ -146,7 +149,7 @@ impl Control {
                     .ui(ui, &mut session_fragment[&entry.id.id], true)
                     .or(request);
 
-                if i != entries_count - 1 {
+                if pos + 1 < visible_indices.len() {
                     ui.end_row();
                 }
             }

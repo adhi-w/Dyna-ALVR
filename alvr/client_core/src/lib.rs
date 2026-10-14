@@ -24,7 +24,8 @@ use alvr_common::{
     warn,
 };
 use alvr_packets::{
-    BatteryInfo, ButtonEntry, ClientControlPacket, RealTimeConfig, StreamConfig, TrackingData,
+    BatteryInfo, ButtonEntry, ClientControlPacket, GazeMagnitudePacket, GazePacket, RealTimeConfig,
+    StreamConfig, TrackingData,
 };
 use alvr_session::CodecType;
 use alvr_system_info::Platform;
@@ -75,6 +76,8 @@ pub struct ClientCapabilities {
 
 pub struct ClientCoreContext {
     platform: Platform,
+    default_view_resolution: UVec2,
+    max_view_resolution: UVec2,
     lifecycle_state: Arc<RwLock<LifecycleState>>,
     event_queue: Arc<Mutex<VecDeque<ClientCoreEvent>>>,
     connection_context: Arc<ConnectionContext>,
@@ -100,6 +103,8 @@ impl ClientCoreContext {
         }
 
         let platform = capabilities.platform;
+        let default_view_resolution = capabilities.default_view_resolution;
+        let max_view_resolution = capabilities.max_view_resolution;
 
         let lifecycle_state = Arc::new(RwLock::new(LifecycleState::Idle));
         let event_queue = Arc::new(Mutex::new(VecDeque::new()));
@@ -120,12 +125,22 @@ impl ClientCoreContext {
 
         Self {
             platform,
+            default_view_resolution,
+            max_view_resolution,
             lifecycle_state,
             event_queue,
             connection_context,
             connection_thread: Arc::new(Mutex::new(Some(connection_thread))),
             last_good_global_view_params: Mutex::new([ViewParams::DUMMY; 2]),
         }
+    }
+
+    pub fn default_view_resolution(&self) -> UVec2 {
+        self.default_view_resolution
+    }
+
+    pub fn max_view_resolution(&self) -> UVec2 {
+        self.max_view_resolution
     }
 
     pub fn resume(&self) {
@@ -228,6 +243,22 @@ impl ClientCoreContext {
         }
     }
 
+    pub fn send_gaze(&self, packet: GazePacket) {
+        dbg_client_core!("send_gaze");
+
+        if let Some(sender) = &mut *self.connection_context.control_sender.lock() {
+            sender.send(&ClientControlPacket::Gaze(packet)).ok();
+        }
+    }
+
+    pub fn send_gaze_magnitude(&self, packet: GazeMagnitudePacket) {
+        dbg_client_core!("send_gaze_magnitude");
+
+        if let Some(sender) = &mut *self.connection_context.control_sender.lock() {
+            sender.send(&ClientControlPacket::GazeMagnitude(packet)).ok();
+        }
+    }
+
     pub fn send_proximity_state(&self, headset_is_worn: bool) {
         if let Some(sender) = &mut *self.connection_context.control_sender.lock() {
             sender
@@ -275,7 +306,10 @@ impl ClientCoreContext {
         *self.connection_context.state.write() = ConnectionState::Disconnecting;
     }
 
-    pub fn report_compositor_start(&self, timestamp: Duration) -> [ViewParams; 2] {
+    pub fn report_compositor_start(
+        &self,
+        timestamp: Duration,
+    ) -> ([ViewParams; 2], Option<[Vec2; 2]>, Option<Vec2>) {
         dbg_client_core!("report_compositor_start");
 
         if let Some(stats) = &mut *self.connection_context.statistics_manager.lock() {
@@ -290,7 +324,23 @@ impl ClientCoreContext {
             }
         }
 
-        *global_view_params_lock
+        let mut center_shift = None;
+        for (ts, shift) in &*self.connection_context.ffr_center_shift_queue.lock() {
+            if *ts == timestamp {
+                center_shift = Some(*shift);
+                break;
+            }
+        }
+
+        let mut center_size = None;
+        for (ts, size) in &*self.connection_context.ffr_center_size_queue.lock() {
+            if *ts == timestamp {
+                center_size = Some(*size);
+                break;
+            }
+        }
+
+        (*global_view_params_lock, center_shift, center_size)
     }
 
     pub fn report_submit(&self, timestamp: Duration, vsync_queue: Duration) {

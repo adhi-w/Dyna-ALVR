@@ -14,9 +14,20 @@ mod bindings {
 }
 use bindings::*;
 
+unsafe extern "C" {
+    fn SetGazeRuntimeFlags(
+        enablePrediction: u8,
+        enableHysteresis: u8,
+        enableDynamicSizing: u8,
+    );
+
+    fn SetGazePredictorErrorXY(errorUvX: f32, errorUvY: f32);
+}
+
 use alvr_common::{
     BUTTON_INFO, HAND_LEFT_ID, HAND_RIGHT_ID, HAND_TRACKER_LEFT_ID, HAND_TRACKER_RIGHT_ID, HEAD_ID,
     Pose, ViewParams, error,
+    glam::Vec2,
     parking_lot::{Mutex, RwLock},
     settings_schema::Switch,
     warn,
@@ -56,15 +67,29 @@ fn event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
                 ServerCoreEvent::SetOpenvrProperty { device_id, prop } => {
                     props::set_openvr_prop(None, device_id, prop)
                 }
-                ServerCoreEvent::ClientConnected => unsafe {
-                    if InitializeStreaming() {
-                        RequestDriverResync();
-                    } else {
-                        SERVER_CORE_CONTEXT.write().take();
+                ServerCoreEvent::ClientConnected => {
+                    let video_config = alvr_server_core::settings().video;
 
-                        ShutdownSteamvr();
+                    unsafe {
+                        if InitializeStreaming() {
+                            // Server-only tunables for dynamic foveal sizing. Applied on stream init.
+                            if let Switch::Enabled(config) = &video_config.dynamic_foveal_sizing {
+                                SetDynamicFovealSizingParams(
+                                    config.dyn_min_size,
+                                    config.dyn_max_size,
+                                    config.grow_rate,
+                                    config.shrink_rate,
+                                );
+                            }
+
+                            RequestDriverResync();
+                        } else {
+                            SERVER_CORE_CONTEXT.write().take();
+
+                            ShutdownSteamvr();
+                        }
                     }
-                },
+                }
 
                 ServerCoreEvent::ClientDisconnected => unsafe { DeinitializeStreaming() },
                 ServerCoreEvent::Battery(info) => unsafe {
@@ -83,7 +108,25 @@ fn event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
                     SetLocalViewParams(ffi_params.as_ptr());
                 },
                 ServerCoreEvent::Tracking { poll_timestamp } => {
-                    let headset_config = &alvr_server_core::settings().headset;
+                    let settings = alvr_server_core::settings();
+                    let headset_config = &settings.headset;
+
+                    unsafe {
+                        if let Switch::Enabled(config) = &settings.video.dynamic_foveal_sizing {
+                            SetDynamicFovealSizingParams(
+                                config.dyn_min_size,
+                                config.dyn_max_size,
+                                config.grow_rate,
+                                config.shrink_rate,
+                            );
+                        }
+
+                        SetGazeRuntimeFlags(
+                            settings.video.enable_gaze_prediction as u8,
+                            settings.video.enable_gaze_hysteresis as u8,
+                            settings.video.dynamic_foveal_sizing.enabled() as u8,
+                        );
+                    }
 
                     let controllers_config = headset_config.controllers.clone().into_option();
                     let track_body = headset_config.body_tracking.enabled();
@@ -95,6 +138,42 @@ fn event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
                         .is_some_and(|c| c.detached_controllers_steamvr_sink);
 
                     if let Some(context) = &*SERVER_CORE_CONTEXT.read() {
+                        if let Some([shift_uv_left, shift_uv_right]) =
+                            context.get_last_received_foveation_center_shift()
+                        {
+                            // Normalized [0,1] (u:right, v:down)
+                            unsafe {
+                                SetFoveationCenterShift(
+                                    shift_uv_left.x,
+                                    shift_uv_left.y,
+                                    shift_uv_right.x,
+                                    shift_uv_right.y,
+                                )
+                            };
+                        }
+
+                        if let Some([mag_uv_x, mag_uv_y]) =
+                            context.get_last_received_gaze_magnitude_uv_xy()
+                        {
+                            unsafe { SetGazeMagnitudeXY(mag_uv_x, mag_uv_y) };
+                        } else if let Some(mag_uv) =
+                            context.get_last_received_gaze_magnitude_uv()
+                        {
+                            // Fallback: treat scalar as isotropic overflow.
+                            unsafe { SetGazeMagnitudeXY(mag_uv, mag_uv) };
+                        }
+
+                        if let Some([err_uv_x, err_uv_y]) =
+                            context.get_last_received_gaze_predictor_error_uv_xy()
+                        {
+                            unsafe { SetGazePredictorErrorXY(err_uv_x, err_uv_y) };
+                        }
+
+                        // Feed a horizon estimate (ms) to the C++ gaze predictor.
+                        // Use ALVR's motion-to-photon (MTP) latency estimate from server statistics.
+                        let mtp_latency_ms = context.get_motion_to_photon_latency().as_secs_f32() * 1000.0;
+                        unsafe { SetGazeNetworkLatencyMs(mtp_latency_ms) };
+
                         let target_timestamp =
                             poll_timestamp + context.get_motion_to_photon_latency();
                         let controllers_pose_time_offset = context.get_tracker_pose_time_offset();
@@ -273,6 +352,15 @@ fn event_loop(events_receiver: mpsc::Receiver<ServerCoreEvent>) {
                 }
                 ServerCoreEvent::RequestIDR => unsafe { RequestIDR() },
                 ServerCoreEvent::CaptureFrame => unsafe { CaptureFrame() },
+                ServerCoreEvent::GtRecordingStart {
+                    mode,
+                    duration_minutes,
+                    filename_suffix,
+                } => {
+                    let suffix = CString::new(filename_suffix).unwrap_or_else(|_| CString::new("").unwrap());
+                    unsafe { StartGtRecording(suffix.as_ptr(), mode, duration_minutes) };
+                }
+                ServerCoreEvent::GtRecordingStop => unsafe { StopGtRecording() },
                 ServerCoreEvent::GameRenderLatencyFeedback(game_latency) => {
                     if cfg!(target_os = "linux") && game_latency.as_secs_f32() > 0.25 {
                         let now = Instant::now();
@@ -436,6 +524,35 @@ extern "C" fn report_present(timestamp_ns: u64, offset_ns: u64) {
     }
 }
 
+extern "C" fn report_foveation_center_shift_used(
+    timestamp_ns: u64,
+    left_shift_x: f32,
+    left_shift_y: f32,
+    right_shift_x: f32,
+    right_shift_y: f32,
+) {
+    if let Some(context) = &*SERVER_CORE_CONTEXT.read() {
+        let shift = [
+            Vec2::new(left_shift_x, left_shift_y),
+            Vec2::new(right_shift_x, right_shift_y),
+        ];
+
+        context.report_foveation_center_shift_used(Duration::from_nanos(timestamp_ns), shift);
+    }
+}
+
+extern "C" fn report_foveation_center_size_used(
+    timestamp_ns: u64,
+    center_size_x: f32,
+    center_size_y: f32,
+) {
+    if let Some(context) = &*SERVER_CORE_CONTEXT.read() {
+        let size = Vec2::new(center_size_x, center_size_y);
+
+        context.report_foveation_center_size_used(Duration::from_nanos(timestamp_ns), size);
+    }
+}
+
 extern "C" fn wait_for_vsync() {
     // Default 120Hz-ish wait if StatisticsManager isn't up.
     // We use 120Hz-ish so that SteamVR doesn't accidentally get
@@ -543,6 +660,8 @@ pub unsafe extern "C" fn HmdDriverFactory(
             GetDynamicEncoderParams = Some(get_dynamic_encoder_params);
             ReportComposed = Some(report_composed);
             ReportPresent = Some(report_present);
+            ReportFoveationCenterShiftUsed = Some(report_foveation_center_shift_used);
+            ReportFoveationCenterSizeUsed = Some(report_foveation_center_size_used);
             WaitForVSync = Some(wait_for_vsync);
             ShutdownRuntime = Some(shutdown_driver);
 

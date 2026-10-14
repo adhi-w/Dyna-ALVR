@@ -88,6 +88,13 @@ struct FfiDynamicEncoderParams {
     float framerate;
 };
 
+extern "C" const unsigned char* AADT2_CSO_PTR;
+extern "C" unsigned int AADT2_CSO_LEN;
+extern "C" const unsigned char* AADT3_CSO_PTR;
+extern "C" unsigned int AADT3_CSO_LEN;
+extern "C" const unsigned char* FRW_CSO_PTR;
+extern "C" unsigned int FRW_CSO_LEN;
+
 extern "C" const unsigned char* FRAME_RENDER_VS_CSO_PTR;
 extern "C" unsigned int FRAME_RENDER_VS_CSO_LEN;
 extern "C" const unsigned char* FRAME_RENDER_PS_CSO_PTR;
@@ -131,6 +138,25 @@ extern "C" void (*ShutdownRuntime)();
 extern "C" unsigned long long (*PathStringToHash)(const char* path);
 extern "C" void (*ReportPresent)(unsigned long long timestamp_ns, unsigned long long offset_ns);
 extern "C" void (*ReportComposed)(unsigned long long timestamp_ns, unsigned long long offset_ns);
+
+// Report the per-eye foveated encoding center shift actually used for a specific frame.
+// Normalized [0,1], x:right, y:down. Timestamp matches VideoSend targetTimestampNs.
+extern "C" void (*ReportFoveationCenterShiftUsed)(
+    unsigned long long targetTimestampNs,
+    float leftShiftX,
+    float leftShiftY,
+    float rightShiftX,
+    float rightShiftY
+);
+
+// Report the foveated encoding center size actually used for a specific frame.
+// Normalized [0,1], shared by both eyes. Timestamp matches VideoSend targetTimestampNs.
+extern "C" void (*ReportFoveationCenterSizeUsed)(
+    unsigned long long targetTimestampNs,
+    float centerSizeX,
+    float centerSizeY
+);
+
 extern "C" FfiDynamicEncoderParams (*GetDynamicEncoderParams)();
 extern "C" unsigned long long (*GetSerialNumber)(unsigned long long deviceID, char* outString);
 extern "C" void (*SetOpenvrProps)(void* instancePtr, unsigned long long deviceID);
@@ -155,6 +181,51 @@ extern "C" void SetTracking(
 extern "C" void RequestDriverResync();
 extern "C" void ShutdownSteamvr();
 
+// Runtime override for per-eye foveated encoding center shift (normalized [0,1], x:right, y:down).
+extern "C" void SetFoveationCenterShift(
+    float leftShiftX,
+    float leftShiftY,
+    float rightShiftX,
+    float rightShiftY
+);
+
+// Runtime data path: client-reported combined gaze magnitude (UV units).
+extern "C" void SetGazeMagnitude(float magnitudeUv);
+extern "C" float GetGazeMagnitude();
+
+// Runtime data path: client-reported per-axis gaze margin metric (UV units).
+// Used for independent X/Y dynamic foveal ROI sizing.
+extern "C" void SetGazeMagnitudeXY(float magnitudeUvX, float magnitudeUvY);
+extern "C" float GetGazeMagnitudeX();
+extern "C" float GetGazeMagnitudeY();
+
+// Runtime data path: client-reported predictor residual (real-time gaze -
+// center-shift anchor), signed UV units.
+extern "C" void SetGazePredictorErrorXY(float errorUvX, float errorUvY);
+extern "C" float GetGazePredictorErrorX();
+extern "C" float GetGazePredictorErrorY();
+
+// Runtime toggles that should apply live without SteamVR restart.
+extern "C" void SetGazeRuntimeFlags(
+    unsigned char enablePrediction,
+    unsigned char enableHysteresis,
+    unsigned char enableDynamicSizing
+);
+
+// Runtime data path: latency horizon estimate for gaze prediction (ms).
+// This is currently fed using the server's motion-to-photon (MTP) latency estimate.
+extern "C" void SetGazeNetworkLatencyMs(float latencyMs);
+extern "C" float GetGazeNetworkLatencyMs();
+
+// Runtime update for dynamic foveal sizing tunables.
+// These are server-side only and can be adjusted without restarting SteamVR.
+extern "C" void SetDynamicFovealSizingParams(
+    float dynMinSize,
+    float dynMaxSize,
+    float growRate,
+    float shrinkRate
+);
+
 extern "C" void SetOpenvrProperty(void* instancePtr, FfiOpenvrProperty prop);
 extern "C" void SetOpenvrPropByDeviceID(unsigned long long deviceID, FfiOpenvrProperty prop);
 extern "C" void RegisterButton(void* instancePtr, unsigned long long buttonID);
@@ -168,6 +239,11 @@ extern "C" void ShutdownOpenvrClient();
 extern "C" void SetChaperoneArea(float areaWidth, float areaHeight);
 
 extern "C" void CaptureFrame();
+
+// GT debug recording (FFR logs + optional encoder bitstream)
+// mode: 0=logs-only, 1=lossless video+logs, 2=compressed video+logs
+extern "C" void StartGtRecording(const char* filenameSuffix, unsigned int mode, unsigned int durationMinutes);
+extern "C" void StopGtRecording();
 
 // NalParsing.cpp
 void ParseFrameNals(

@@ -64,12 +64,17 @@ pub struct OpenvrConfig {
     pub body_tracking_vive_enabled: bool,
     pub body_tracking_has_legs: bool,
     pub enable_foveated_encoding: bool,
+    pub foveation_method: u8,
+    pub enable_gaze_prediction: bool,
+    pub enable_gaze_hysteresis: bool,
+    pub enable_dynamic_foveal_sizing: bool,
     pub foveation_center_size_x: f32,
     pub foveation_center_size_y: f32,
     pub foveation_center_shift_x: f32,
     pub foveation_center_shift_y: f32,
     pub foveation_edge_ratio_x: f32,
     pub foveation_edge_ratio_y: f32,
+    pub foveation_frw_magnitude: f32,
     pub enable_color_correction: bool,
     pub brightness: f32,
     pub contrast: f32,
@@ -161,6 +166,84 @@ impl Default for SessionConfig {
 }
 
 impl SessionConfig {
+    fn migrate_legacy_settings(&mut self, session_json: &json::Value) {
+        // Migrate legacy `show_eyes_debug_markers` from the old location:
+        // session_settings.video.foveated_encoding.content.show_eyes_debug_markers
+        // to the new location:
+        // session_settings.video.show_eyes_debug_markers
+        let new_has_value = session_json
+            .get("session_settings")
+            .and_then(|s| s.get("video"))
+            .and_then(|v| v.get("show_eyes_debug_markers"))
+            .and_then(|v| v.as_bool())
+            .is_some();
+
+        if !new_has_value {
+            if let Some(legacy_value) = session_json
+                .get("session_settings")
+                .and_then(|s| s.get("video"))
+                .and_then(|v| v.get("foveated_encoding"))
+                .and_then(|v| v.get("content"))
+                .and_then(|v| v.get("show_eyes_debug_markers"))
+                .and_then(|v| v.as_bool())
+            {
+                self.session_settings.video.show_eyes_debug_markers = legacy_value;
+            }
+        }
+
+        // Migrate legacy Dynamic Foveal Sizing fields from the old flat layout:
+        // - session_settings.video.enable_dynamic_foveal_sizing
+        // - session_settings.video.{dyn_min_size,dyn_max_size,grow_rate,shrink_rate}
+        // to the new nested layout:
+        // - session_settings.video.dynamic_foveal_sizing.{enabled,content.*}
+        let has_new_layout = session_json
+            .get("session_settings")
+            .and_then(|s| s.get("video"))
+            .and_then(|v| v.get("dynamic_foveal_sizing"))
+            .is_some();
+
+        if !has_new_layout {
+            let video_json = session_json
+                .get("session_settings")
+                .and_then(|s| s.get("video"));
+
+            if let Some(enabled) = video_json
+                .and_then(|v| v.get("enable_dynamic_foveal_sizing"))
+                .and_then(|v| v.as_bool())
+            {
+                self.session_settings.video.dynamic_foveal_sizing.enabled = enabled;
+            }
+
+            if let Some(value) = video_json
+                .and_then(|v| v.get("dyn_min_size"))
+                .and_then(|v| v.as_f64())
+            {
+                self.session_settings.video.dynamic_foveal_sizing.content.dyn_min_size =
+                    value as f32;
+            }
+            if let Some(value) = video_json
+                .and_then(|v| v.get("dyn_max_size"))
+                .and_then(|v| v.as_f64())
+            {
+                self.session_settings.video.dynamic_foveal_sizing.content.dyn_max_size =
+                    value as f32;
+            }
+            if let Some(value) = video_json
+                .and_then(|v| v.get("grow_rate"))
+                .and_then(|v| v.as_f64())
+            {
+                self.session_settings.video.dynamic_foveal_sizing.content.grow_rate = value as f32;
+            }
+            if let Some(value) = video_json
+                .and_then(|v| v.get("shrink_rate"))
+                .and_then(|v| v.as_f64())
+            {
+                self.session_settings.video.dynamic_foveal_sizing.content.shrink_rate =
+                    value as f32;
+            }
+        }
+    }
+
     // If json_value is not a valid representation of SessionConfig (because of version upgrade),
     // use some fuzzy logic to extrapolate as much information as possible.
     // Since SessionConfig cannot have a schema (because SessionSettings would need to also have a
@@ -173,6 +256,8 @@ impl SessionConfig {
 
         if let Ok(session_desc) = json::from_value(json_value.clone()) {
             *self = session_desc;
+
+            self.migrate_legacy_settings(json_value);
             return Ok(());
         }
 
@@ -213,6 +298,8 @@ impl SessionConfig {
             Ok(session_settings) => {
                 session_desc_mut.session_settings = session_settings;
                 *self = session_desc_mut;
+
+                self.migrate_legacy_settings(json_value);
                 Ok(())
             }
             Err(e) => {

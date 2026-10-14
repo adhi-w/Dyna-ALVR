@@ -74,9 +74,16 @@ pub enum ClientConnectionResult {
     ClientStandby,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub struct NegotiatedStreamingConfigExt {
-    // Nothing for now
+    /// Server-side "emulated (render)" per-eye resolution.
+    ///
+    /// This can be higher than `NegotiatedStreamingConfig::view_resolution`, which is the
+    /// transcoding/encoded resolution.
+    ///
+    /// When present, clients may use it as the *presentation* target size (swapchain) and upscale
+    /// the decoded frame into it.
+    pub emulated_view_resolution: Option<UVec2>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -100,11 +107,11 @@ impl NegotiatedStreamingConfig {
     }
 
     pub fn ext(&self) -> Result<NegotiatedStreamingConfigExt> {
-        let _ext_json = json::from_str::<json::Value>(&self.ext_str)?;
+        if self.ext_str.is_empty() {
+            return Ok(NegotiatedStreamingConfigExt::default());
+        }
 
-        // decode values here
-
-        Ok(NegotiatedStreamingConfigExt {})
+        Ok(json::from_str::<NegotiatedStreamingConfigExt>(&self.ext_str)?)
     }
 }
 
@@ -156,6 +163,7 @@ pub enum ServerControlPacket {
     Restarting,
     KeepAlive,
     RealTimeConfig(RealTimeConfig),
+    FFR(FFRPacket),
     Reserved(String),
     ReservedBuffer(Vec<u8>),
 }
@@ -198,8 +206,64 @@ pub enum ClientControlPacket {
         message: String,
     },
     ProximityState(bool),
+    Gaze(GazePacket),
+    /// Combined gaze magnitude (positive) between client real-time gaze UV and the per-frame
+    /// center-shift UV received from the server. Scaled by 100.0 on the client.
+    GazeMagnitude(GazeMagnitudePacket),
+    /// Client-estimated latency in milliseconds (ms) between the local real-time clock used for
+    /// rendering and the per-frame server timestamp received in the video stream.
+    ///
+    /// This is intended as a practical horizon estimate for server-side gaze prediction.
+    GazeLatency(GazeLatencyPacket),
     Reserved(String),
     ReservedBuffer(Vec<u8>),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GazePacket {
+    pub timestamp: Duration,
+    // Per-eye normalized UV in [0,1], in texture UV convention (u: right, v: down)
+    pub gaze_uv: [Vec2; 2],
+    // Per-eye gaze magnitude in UV units (distance from (0.5, 0.5)).
+    pub gaze_magnitude: [f32; 2],
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GazeMagnitudePacket {
+    pub timestamp: Duration,
+    // Magnitude in UV units.
+    pub magnitude: f32,
+
+    // Optional per-axis margin metrics in UV units.
+    // When non-zero, these represent how far the gaze exceeds the inner margin
+    // of the foveal ROI along each axis (see client computation).
+    // Added for independent X/Y dynamic sizing; defaults allow backward compatibility.
+    #[serde(default)]
+    pub magnitude_x: f32,
+    #[serde(default)]
+    pub magnitude_y: f32,
+
+    // Optional per-axis predictor residual in UV units.
+    // Represents (real-time gaze - center-shift anchor) in signed UV space.
+    // Kept separate from margin metrics to avoid coupling predictor feedback
+    // to dynamic ROI heuristics.
+    #[serde(default)]
+    pub predictor_error_x: f32,
+    #[serde(default)]
+    pub predictor_error_y: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct GazeLatencyPacket {
+    pub timestamp: Duration,
+    pub latency_ms: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FFRPacket {
+    pub timestamp: Duration,
+    // Per-eye normalized center shift in [0,1] (u: right, v: down)
+    pub center_shift: [Vec2; 2],
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -236,6 +300,12 @@ pub struct VideoPacketHeader {
     pub timestamp: Duration,
     pub global_view_params: [ViewParams; 2],
     pub is_idr: bool,
+    // Per-eye normalized center shift in [0,1] (u: right, v: down). When None, no gaze-based
+    // center shift should be applied.
+    pub center_shift: Option<[Vec2; 2]>,
+    // Normalized center size in [0,1], shared by both eyes. When None, client should use the
+    // negotiated static center size.
+    pub center_size: Option<Vec2>,
 }
 
 #[derive(Serialize, Deserialize)]

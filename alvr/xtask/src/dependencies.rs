@@ -67,11 +67,27 @@ pub fn prepare_ffmpeg_windows(deps_path: &Path) {
     )
     .unwrap();
 
-    fs::rename(
-        deps_path.join("ffmpeg-n7.1-latest-win64-gpl-shared-7.1"),
-        deps_path.join("ffmpeg"),
-    )
-    .unwrap();
+    let extracted_dir = deps_path.join("ffmpeg-n7.1-latest-win64-gpl-shared-7.1");
+    let destination_dir = deps_path.join("ffmpeg");
+
+    if destination_dir.exists() {
+        fs::remove_dir_all(&destination_dir).unwrap_or_else(|e| {
+            panic!(
+                "Failed to remove existing Windows FFmpeg folder at {}: {e}.\n\
+                Make sure no process (Explorer, antivirus, ffmpeg.exe) is locking it and try again.",
+                destination_dir.display()
+            )
+        });
+    }
+
+    fs::rename(&extracted_dir, &destination_dir).unwrap_or_else(|e| {
+        panic!(
+            "Failed to move extracted FFmpeg folder from {} to {}: {e}.\n\
+            This is often caused by a locked directory. Close any program using it and retry.",
+            extracted_dir.display(),
+            destination_dir.display()
+        )
+    });
 }
 
 fn prepare_libvpl_windows(deps_path: &Path) {

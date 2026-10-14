@@ -1,7 +1,7 @@
 mod components;
 
 use self::components::{
-    DevicesTab, LogsTab, NotificationBar, SettingsTab, SetupWizard, SetupWizardRequest,
+    DebugTab, DevicesTab, LogsTab, NotificationBar, SettingsTab, SetupWizard, SetupWizardRequest,
 };
 use crate::{
     DataSources,
@@ -9,6 +9,7 @@ use crate::{
 };
 use alvr_common::{
     LogEntry,
+    LogSeverity,
     parking_lot::{Condvar, Mutex},
 };
 use alvr_events::EventType;
@@ -35,6 +36,8 @@ pub enum ServerRequest {
     InsertIdr,
     StartRecording,
     StopRecording,
+    StartGtRecording(GtRecordingStartConfig),
+    StopGtRecording,
     AddFirewallRules,
     RemoveFirewallRules,
     GetDriverList,
@@ -42,6 +45,20 @@ pub enum ServerRequest {
     UnregisterDriver(PathBuf),
     RestartSteamvr,
     ShutdownSteamvr,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct GtRecordingStartConfig {
+    pub filename_suffix: String,
+    pub mode: GtRecordingMode,
+    pub duration_minutes: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GtRecordingMode {
+    LogsOnly,
+    Lossless,
+    Compressed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -69,6 +86,7 @@ pub struct Dashboard {
     #[cfg(not(target_arch = "wasm32"))]
     installation_tab: components::InstallationTab,
     logs_tab: LogsTab,
+    debug_tab: DebugTab,
     notification_bar: NotificationBar,
     setup_wizard: SetupWizard,
     new_version_popup: Option<components::NewVersionPopup>,
@@ -106,6 +124,7 @@ impl Dashboard {
             #[cfg(not(target_arch = "wasm32"))]
             installation_tab: components::InstallationTab::new(),
             logs_tab: LogsTab::new(),
+            debug_tab: DebugTab::new(),
             notification_bar: NotificationBar::new(),
             setup_wizard: SetupWizard::new(),
             setup_wizard_open: false,
@@ -324,7 +343,7 @@ impl eframe::App for Dashboard {
                             }
                             Tab::Logs => self.logs_tab.ui(ui),
                             Tab::Debug => {
-                                if let Some(request) = components::debug_tab_ui(ui) {
+                                if let Some(request) = self.debug_tab.ui(ui) {
                                     requests.push(request);
                                 }
                             }
@@ -353,6 +372,41 @@ impl eframe::App for Dashboard {
         }
 
         for request in requests {
+            match &request {
+                ServerRequest::StartGtRecording(config) => {
+                    self.statistics_tab
+                        .start_recording(config.filename_suffix.clone());
+                }
+                ServerRequest::StopGtRecording => {
+                    match self.statistics_tab.stop_recording_and_save_medians() {
+                        Ok(path) => {
+                            self.notification_bar.push_notification(
+                                LogEntry {
+                                    severity: LogSeverity::Info,
+                                    content: format!(
+                                        "Statistics medians saved to {}",
+                                        path.display()
+                                    ),
+                                },
+                                true,
+                            );
+                        }
+                        Err(e) => {
+                            self.notification_bar.push_notification(
+                                LogEntry {
+                                    severity: LogSeverity::Warning,
+                                    content: format!(
+                                        "Statistics medians not saved: {e}"
+                                    ),
+                                },
+                                true,
+                            );
+                        }
+                    }
+                }
+                _ => (),
+            }
+
             self.data_sources.request(request);
         }
 

@@ -17,7 +17,11 @@ extern uint64_t g_DriverTestMode;
 Settings Settings::m_Instance;
 
 Settings::Settings()
-    : m_loaded(false) { }
+    : m_loaded(false)
+    , m_enableGazePrediction(true)
+    , m_enableGazeHysteresis(true)
+    , m_enableDynamicFovealSizing(true)
+    { }
 
 Settings::~Settings() { }
 
@@ -47,12 +51,39 @@ void Settings::Load() {
         m_captureFrameDir = config.get("capture_frame_dir").get<std::string>();
 
         m_enableFoveatedEncoding = config.get("enable_foveated_encoding").get<bool>();
+        m_foveationMethod = (uint32_t)config.get("foveation_method").get<int64_t>();
+
+        // Default is true (set in constructor) for backward compatibility.
+        auto enableGazePredictionJson = config.get("enable_gaze_prediction");
+        if (enableGazePredictionJson.is<bool>()) {
+            m_enableGazePrediction = enableGazePredictionJson.get<bool>();
+        }
+        auto enableGazeHysteresisJson = config.get("enable_gaze_hysteresis");
+        if (enableGazeHysteresisJson.is<bool>()) {
+            m_enableGazeHysteresis = enableGazeHysteresisJson.get<bool>();
+        }
+        auto enableDynamicSizingJson = config.get("enable_dynamic_foveal_sizing");
+        if (enableDynamicSizingJson.is<bool>()) {
+            m_enableDynamicFovealSizing = enableDynamicSizingJson.get<bool>();
+        }
+
         m_foveationCenterSizeX = (float)config.get("foveation_center_size_x").get<double>();
         m_foveationCenterSizeY = (float)config.get("foveation_center_size_y").get<double>();
         m_foveationCenterShiftX = (float)config.get("foveation_center_shift_x").get<double>();
         m_foveationCenterShiftY = (float)config.get("foveation_center_shift_y").get<double>();
+        // Per-eye foveation shift defaults to the generic value.
+        m_foveationCenterShiftXLeft = m_foveationCenterShiftX;
+        m_foveationCenterShiftYLeft = m_foveationCenterShiftY;
+        m_foveationCenterShiftXRight = m_foveationCenterShiftX;
+        m_foveationCenterShiftYRight = m_foveationCenterShiftY;
         m_foveationEdgeRatioX = (float)config.get("foveation_edge_ratio_x").get<double>();
         m_foveationEdgeRatioY = (float)config.get("foveation_edge_ratio_y").get<double>();
+        auto frwMagnitudeJson = config.get("foveation_frw_magnitude");
+        if (frwMagnitudeJson.is<double>()) {
+            m_foveationFrwMagnitude = (float)frwMagnitudeJson.get<double>();
+        } else {
+            m_foveationFrwMagnitude = 4.66f;
+        }
 
         m_enableColorCorrection = config.get("enable_color_correction").get<bool>();
         m_brightness = (float)config.get("brightness").get<double>();

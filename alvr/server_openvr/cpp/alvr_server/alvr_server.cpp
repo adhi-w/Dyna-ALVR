@@ -15,9 +15,11 @@
 #include "Settings.h"
 #include "TrackedDevice.h"
 #include "bindings.h"
+#include "GtRecording.h"
 #include "driverlog.h"
 #include "openvr_driver_wrap.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -41,6 +43,13 @@ void _SetChaperoneArea(float areaWidth, float areaHeight);
 
 vr::EVREventType VendorEvent_ALVRDriverResync
     = (vr::EVREventType)(vr::VREvent_VendorSpecific_Reserved_Start + ((vr::EVREventType)0xC0));
+
+static std::atomic<float> g_gazeMagnitudeUv{0.0f};
+static std::atomic<float> g_gazeMagnitudeUvX{0.0f};
+static std::atomic<float> g_gazeMagnitudeUvY{0.0f};
+static std::atomic<float> g_gazePredictorErrorUvX{0.0f};
+static std::atomic<float> g_gazePredictorErrorUvY{0.0f};
+static std::atomic<float> g_gazeNetworkLatencyMs{0.0f};
 
 static void load_debug_privilege(void) {
 #ifdef _WIN32
@@ -175,6 +184,12 @@ public:
 } g_driver_provider;
 
 // bindigs for Rust
+const unsigned char* AADT2_CSO_PTR;
+unsigned int AADT2_CSO_LEN;
+const unsigned char* AADT3_CSO_PTR;
+unsigned int AADT3_CSO_LEN;
+const unsigned char* FRW_CSO_PTR;
+unsigned int FRW_CSO_LEN;
 
 const unsigned char* FRAME_RENDER_VS_CSO_PTR;
 unsigned int FRAME_RENDER_VS_CSO_LEN;
@@ -215,6 +230,18 @@ void (*ShutdownRuntime)();
 unsigned long long (*PathStringToHash)(const char* path);
 void (*ReportPresent)(unsigned long long timestamp_ns, unsigned long long offset_ns);
 void (*ReportComposed)(unsigned long long timestamp_ns, unsigned long long offset_ns);
+void (*ReportFoveationCenterShiftUsed)(
+    unsigned long long targetTimestampNs,
+    float leftShiftX,
+    float leftShiftY,
+    float rightShiftX,
+    float rightShiftY
+);
+void (*ReportFoveationCenterSizeUsed)(
+    unsigned long long targetTimestampNs,
+    float centerSizeX,
+    float centerSizeY
+);
 FfiDynamicEncoderParams (*GetDynamicEncoderParams)();
 unsigned long long (*GetSerialNumber)(unsigned long long deviceID, char* outString);
 void (*SetOpenvrProps)(void* instancePtr, unsigned long long deviceID);
@@ -523,6 +550,65 @@ void SetChaperoneArea(float areaWidth, float areaHeight) {
     _SetChaperoneArea(areaWidth, areaHeight);
 }
 
+void SetFoveationCenterShift(
+    float centerShiftXLeft,
+    float centerShiftYLeft,
+    float centerShiftXRight,
+    float centerShiftYRight
+) {
+    Settings::Instance().m_foveationCenterShiftXLeft = centerShiftXLeft;
+    Settings::Instance().m_foveationCenterShiftYLeft = centerShiftYLeft;
+    Settings::Instance().m_foveationCenterShiftXRight = centerShiftXRight;
+    Settings::Instance().m_foveationCenterShiftYRight = centerShiftYRight;
+}
+
+void SetGazeMagnitude(float magnitudeUv) {
+    g_gazeMagnitudeUv.store(magnitudeUv, std::memory_order_relaxed);
+}
+
+float GetGazeMagnitude() { return g_gazeMagnitudeUv.load(std::memory_order_relaxed); }
+
+void SetGazeMagnitudeXY(float magnitudeUvX, float magnitudeUvY) {
+    g_gazeMagnitudeUvX.store(magnitudeUvX, std::memory_order_relaxed);
+    g_gazeMagnitudeUvY.store(magnitudeUvY, std::memory_order_relaxed);
+}
+
+extern "C" void SetGazePredictorErrorXY(float errorUvX, float errorUvY) {
+    g_gazePredictorErrorUvX.store(errorUvX, std::memory_order_relaxed);
+    g_gazePredictorErrorUvY.store(errorUvY, std::memory_order_relaxed);
+}
+
+extern "C" void SetGazeRuntimeFlags(
+    unsigned char enablePrediction,
+    unsigned char enableHysteresis,
+    unsigned char enableDynamicSizing
+) {
+    Settings::Instance().m_enableGazePrediction = (enablePrediction != 0);
+    Settings::Instance().m_enableGazeHysteresis = (enableHysteresis != 0);
+    Settings::Instance().m_enableDynamicFovealSizing = (enableDynamicSizing != 0);
+}
+
+float GetGazeMagnitudeX() { return g_gazeMagnitudeUvX.load(std::memory_order_relaxed); }
+
+float GetGazeMagnitudeY() { return g_gazeMagnitudeUvY.load(std::memory_order_relaxed); }
+
+float GetGazePredictorErrorX() {
+    return g_gazePredictorErrorUvX.load(std::memory_order_relaxed);
+}
+
+float GetGazePredictorErrorY() {
+    return g_gazePredictorErrorUvY.load(std::memory_order_relaxed);
+}
+
+void SetGazeNetworkLatencyMs(float latencyMs) {
+    // Keep this simple and lock-free; callers are expected to provide a reasonable estimate.
+    g_gazeNetworkLatencyMs.store(latencyMs, std::memory_order_relaxed);
+}
+
+float GetGazeNetworkLatencyMs() {
+    return g_gazeNetworkLatencyMs.load(std::memory_order_relaxed);
+}
+
 void CaptureFrame() {
 #ifndef __APPLE__
     if (g_driver_provider.hmd && g_driver_provider.hmd->m_encoder) {
@@ -530,3 +616,9 @@ void CaptureFrame() {
     }
 #endif
 }
+
+void StartGtRecording(const char* filenameSuffix, unsigned int mode, unsigned int durationMinutes) {
+    alvr::gt_recording::Start(filenameSuffix, mode, durationMinutes);
+}
+
+void StopGtRecording() { alvr::gt_recording::Stop(); }

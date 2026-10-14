@@ -4,6 +4,128 @@
 #include "alvr_server/Logger.h"
 #include "alvr_server/Settings.h"
 #include "alvr_server/Utils.h"
+#include "alvr_server/GtRecording.h"
+
+#include <filesystem>
+
+namespace {
+namespace FSys = std::filesystem;
+
+static GUID GetQualityPresetGuid() {
+    switch (Settings::Instance().m_nvencQualityPreset) {
+    case 7:
+        return NV_ENC_PRESET_P7_GUID;
+    case 6:
+        return NV_ENC_PRESET_P6_GUID;
+    case 5:
+        return NV_ENC_PRESET_P5_GUID;
+    case 4:
+        return NV_ENC_PRESET_P4_GUID;
+    case 3:
+        return NV_ENC_PRESET_P3_GUID;
+    case 2:
+        return NV_ENC_PRESET_P2_GUID;
+    case 1:
+    default:
+        return NV_ENC_PRESET_P1_GUID;
+    }
+}
+
+static void FillRecordingEncodeConfig(
+    NvEncoder* encoder,
+    NV_ENC_INITIALIZE_PARAMS& initializeParams,
+    int refreshRate,
+    int renderWidth,
+    int renderHeight,
+    uint64_t bitrate_bps,
+    bool lossless
+) {
+    auto& encodeConfig = *initializeParams.encodeConfig;
+
+    // Recording is always HEVC bitstream (matches .h265 filename).
+    const GUID encoderGUID = NV_ENC_CODEC_HEVC_GUID;
+    const GUID qualityPreset = GetQualityPresetGuid();
+
+    NV_ENC_TUNING_INFO tuningPreset
+        = static_cast<NV_ENC_TUNING_INFO>(Settings::Instance().m_nvencTuningPreset);
+    if (lossless) {
+        tuningPreset = NV_ENC_TUNING_INFO_LOSSLESS;
+    }
+
+    encoder->CreateDefaultEncoderParams(&initializeParams, encoderGUID, qualityPreset, tuningPreset);
+
+    initializeParams.encodeWidth = initializeParams.darWidth = renderWidth;
+    initializeParams.encodeHeight = initializeParams.darHeight = renderHeight;
+    initializeParams.frameRateNum = refreshRate;
+    initializeParams.frameRateDen = 1;
+
+    // Keep common defaults consistent with streaming.
+    uint32_t maxNumRefFrames = 0;
+    uint32_t gopLength = NVENC_INFINITE_GOPLENGTH;
+    if (Settings::Instance().m_nvencMaxNumRefFrames != -1) {
+        maxNumRefFrames = Settings::Instance().m_nvencMaxNumRefFrames;
+    }
+    if (Settings::Instance().m_nvencGopLength != -1) {
+        gopLength = Settings::Instance().m_nvencGopLength;
+    }
+
+    auto& hevcConfig = encodeConfig.encodeCodecConfig.hevcConfig;
+    hevcConfig.repeatSPSPPS = 1;
+    hevcConfig.enableIntraRefresh = Settings::Instance().m_nvencEnableIntraRefresh;
+    hevcConfig.maxNumRefFramesInDPB = maxNumRefFrames;
+    hevcConfig.idrPeriod = gopLength;
+
+    if (Settings::Instance().m_use10bitEncoder) {
+        hevcConfig.pixelBitDepthMinus8 = 2;
+    }
+
+    hevcConfig.hevcVUIParameters.videoSignalTypePresentFlag = 1;
+    hevcConfig.hevcVUIParameters.videoFormat = NV_ENC_VUI_VIDEO_FORMAT_UNSPECIFIED;
+    hevcConfig.hevcVUIParameters.videoFullRangeFlag = 1;
+    hevcConfig.hevcVUIParameters.colourDescriptionPresentFlag = 1;
+    if (Settings::Instance().m_enableHdr) {
+        hevcConfig.hevcVUIParameters.colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT2020;
+        hevcConfig.hevcVUIParameters.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SRGB;
+        hevcConfig.hevcVUIParameters.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_BT2020_NCL;
+    } else {
+        hevcConfig.hevcVUIParameters.colourPrimaries = NV_ENC_VUI_COLOR_PRIMARIES_BT709;
+        hevcConfig.hevcVUIParameters.transferCharacteristics = NV_ENC_VUI_TRANSFER_CHARACTERISTIC_SRGB;
+        hevcConfig.hevcVUIParameters.colourMatrix = NV_ENC_VUI_MATRIX_COEFFS_BT709;
+    }
+
+    encodeConfig.gopLength = gopLength;
+    encodeConfig.frameIntervalP = 1;
+
+    if (lossless) {
+        // Recording-only lossless-ish mode: CONSTQP=0. (Does not touch streaming settings.)
+        encodeConfig.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
+        encodeConfig.rcParams.constQP = { 0, 0, 0 };
+        encodeConfig.rcParams.enableAQ = 0;
+        encodeConfig.rcParams.enableTemporalAQ = 0;
+        return;
+    }
+
+    // Default/compressed recording: follow user settings for RC.
+    switch (Settings::Instance().m_rateControlMode) {
+    case ALVR_CBR:
+        encodeConfig.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CBR;
+        break;
+    case ALVR_VBR:
+        encodeConfig.rcParams.rateControlMode = NV_ENC_PARAMS_RC_VBR;
+        break;
+    }
+
+    encodeConfig.rcParams.multiPass
+        = static_cast<NV_ENC_MULTI_PASS>(Settings::Instance().m_nvencMultiPass);
+
+    // Use same vbv sizing heuristic as streaming.
+    uint32_t maxFrameSize = static_cast<uint32_t>(bitrate_bps / refreshRate);
+    encodeConfig.rcParams.vbvBufferSize = maxFrameSize * 1.1;
+    encodeConfig.rcParams.vbvInitialDelay = maxFrameSize * 1.1;
+    encodeConfig.rcParams.maxBitRate = static_cast<uint32_t>(bitrate_bps);
+    encodeConfig.rcParams.averageBitRate = static_cast<uint32_t>(bitrate_bps);
+}
+}
 
 VideoEncoderNVENC::VideoEncoderNVENC(std::shared_ptr<CD3DRender> pD3DRender, int width, int height)
     : m_pD3DRender(pD3DRender)
@@ -34,6 +156,8 @@ void VideoEncoderNVENC::Initialize() {
         m_renderHeight,
         format
     );
+
+    m_bufferFormat = format;
 
     try {
         m_NvNecoder = std::make_shared<NvEncoderD3D11>(
@@ -67,18 +191,32 @@ void VideoEncoderNVENC::Initialize() {
         throw MakeException("NvEnc CreateEncoder failed. Code=%d %hs", e.getErrorCode(), e.what());
     }
 
+    // GT recording (bitstream + CSV) is started/stopped at runtime from the Dashboard.
+    m_recordingOpenSessionId = 0;
+    m_recordingWasLossless = false;
+
     Debug("CNvEncoder is successfully initialized.\n");
 }
 
 void VideoEncoderNVENC::Shutdown() {
-    std::vector<std::vector<uint8_t>> vPacket;
-    if (m_NvNecoder)
-        m_NvNecoder->EndEncode(vPacket);
-
-    for (std::vector<uint8_t>& packet : vPacket) {
-        if (fpOut) {
-            fpOut.write(reinterpret_cast<char*>(packet.data()), packet.size());
+    if (m_recordingEncoder) {
+        std::vector<std::vector<uint8_t>> recordingPackets;
+        m_recordingEncoder->EndEncode(recordingPackets);
+        for (auto& packet : recordingPackets) {
+            if (fpOut) {
+                fpOut.write(reinterpret_cast<char*>(packet.data()), packet.size());
+            }
         }
+    }
+
+    if (m_NvNecoder) {
+        std::vector<std::vector<uint8_t>> discardPackets;
+        m_NvNecoder->EndEncode(discardPackets);
+    }
+
+    if (m_recordingEncoder) {
+        m_recordingEncoder->DestroyEncoder();
+        m_recordingEncoder.reset();
     }
     if (m_NvNecoder) {
         m_NvNecoder->DestroyEncoder();
@@ -95,6 +233,84 @@ void VideoEncoderNVENC::Shutdown() {
 void VideoEncoderNVENC::Transmit(
     ID3D11Texture2D* pTexture, uint64_t presentationTime, uint64_t targetTimestampNs, bool insertIDR
 ) {
+    // Update GT recording state and (re)initialize recording encoder/file on demand.
+    alvr::gt_recording::Update();
+    const bool wantRecordVideo = alvr::gt_recording::IsVideoEnabled();
+    const bool wantLossless = alvr::gt_recording::IsLossless();
+    const uint64_t recordSessionId = alvr::gt_recording::SessionId();
+
+    auto stopRecording = [&]() {
+        if (m_recordingEncoder) {
+            std::vector<std::vector<uint8_t>> tailPackets;
+            m_recordingEncoder->EndEncode(tailPackets);
+            for (auto& packet : tailPackets) {
+                if (fpOut) {
+                    fpOut.write(reinterpret_cast<char*>(packet.data()), packet.size());
+                }
+            }
+            m_recordingEncoder->DestroyEncoder();
+            m_recordingEncoder.reset();
+        }
+
+        if (fpOut) {
+            fpOut.flush();
+            fpOut.close();
+        }
+        m_recordingOpenSessionId = 0;
+        m_recordingWasLossless = false;
+    };
+
+    const bool needRestart = wantRecordVideo
+        && (!m_recordingEncoder || !fpOut || m_recordingOpenSessionId != recordSessionId
+            || m_recordingWasLossless != wantLossless);
+
+    if (needRestart) {
+        stopRecording();
+
+        std::error_code ec;
+        FSys::create_directories(alvr::gt_recording::LogDir(), ec);
+
+        fpOut.open(
+            alvr::gt_recording::GetVideoFilePath(wantLossless),
+            std::ios::out | std::ios::binary | std::ios::trunc
+        );
+        if (!fpOut) {
+            Debug("Failed to open encoded video recording file.\n");
+        } else {
+            try {
+                m_recordingEncoder = std::make_shared<NvEncoderD3D11>(
+                    m_pD3DRender->GetDevice(), m_renderWidth, m_renderHeight, m_bufferFormat, 0
+                );
+
+                NV_ENC_INITIALIZE_PARAMS recordingInitParams = { NV_ENC_INITIALIZE_PARAMS_VER };
+                NV_ENC_CONFIG recordingConfig = { NV_ENC_CONFIG_VER };
+                recordingInitParams.encodeConfig = &recordingConfig;
+                FillRecordingEncodeConfig(
+                    m_recordingEncoder.get(),
+                    recordingInitParams,
+                    m_refreshRate,
+                    m_renderWidth,
+                    m_renderHeight,
+                    (uint64_t)m_bitrateInMBits * 1'000'000L,
+                    wantLossless
+                );
+
+                m_recordingEncoder->CreateEncoder(&recordingInitParams);
+
+                m_recordingOpenSessionId = recordSessionId;
+                m_recordingWasLossless = wantLossless;
+            } catch (...) {
+                Debug("Failed to initialize recording encoder. Recording disabled.\n");
+                if (m_recordingEncoder) {
+                    m_recordingEncoder.reset();
+                }
+                fpOut.close();
+            }
+        }
+    } else if (!wantRecordVideo && (m_recordingEncoder || fpOut)) {
+        stopRecording();
+    }
+
     auto params = GetDynamicEncoderParams();
     if (params.updated) {
         m_bitrateInMBits = params.bitrate_bps / 1'000'000;
@@ -111,6 +327,24 @@ void VideoEncoderNVENC::Transmit(
         NV_ENC_RECONFIGURE_PARAMS reconfigureParams = { NV_ENC_RECONFIGURE_PARAMS_VER };
         reconfigureParams.reInitEncodeParams = initializeParams;
         m_NvNecoder->Reconfigure(&reconfigureParams);
+
+        if (m_recordingEncoder && !m_recordingWasLossless) {
+            NV_ENC_INITIALIZE_PARAMS recordingInitParams = { NV_ENC_INITIALIZE_PARAMS_VER };
+            NV_ENC_CONFIG recordingConfig = { NV_ENC_CONFIG_VER };
+            recordingInitParams.encodeConfig = &recordingConfig;
+            FillRecordingEncodeConfig(
+                m_recordingEncoder.get(),
+                recordingInitParams,
+                params.framerate,
+                m_renderWidth,
+                m_renderHeight,
+                params.bitrate_bps,
+                false
+            );
+            NV_ENC_RECONFIGURE_PARAMS recReconfigureParams = { NV_ENC_RECONFIGURE_PARAMS_VER };
+            recReconfigureParams.reInitEncodeParams = recordingInitParams;
+            m_recordingEncoder->Reconfigure(&recReconfigureParams);
+        }
     }
 
     std::vector<std::vector<uint8_t>> vPacket;
@@ -151,11 +385,26 @@ void VideoEncoderNVENC::Transmit(
             continue;
         }
 
-        if (fpOut) {
-            fpOut.write(reinterpret_cast<char*>(buf), len);
+        ParseFrameNals(m_codec, buf, len, targetTimestampNs, insertIDR);
+    }
+
+    // Recording: encode again with independent settings and write that bitstream to file.
+    if (m_recordingEncoder && fpOut) {
+        std::vector<std::vector<uint8_t>> recordingPackets;
+        const NvEncInputFrame* recordingInputFrame = m_recordingEncoder->GetNextInputFrame();
+        ID3D11Texture2D* recordingInputTexture
+            = reinterpret_cast<ID3D11Texture2D*>(recordingInputFrame->inputPtr);
+        m_pD3DRender->GetContext()->CopyResource(recordingInputTexture, pTexture);
+
+        NV_ENC_PIC_PARAMS recPicParams = {};
+        if (insertIDR) {
+            recPicParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
         }
 
-        ParseFrameNals(m_codec, buf, len, targetTimestampNs, insertIDR);
+        m_recordingEncoder->EncodeFrame(recordingPackets, &recPicParams);
+        for (auto& packet : recordingPackets) {
+            fpOut.write(reinterpret_cast<char*>(packet.data()), packet.size());
+        }
     }
 }
 

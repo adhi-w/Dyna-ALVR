@@ -19,7 +19,8 @@ use alvr_graphics::{
 };
 use alvr_packets::{ButtonEntry, ButtonValue, FaceData, TrackingData};
 use alvr_session::{
-    CodecType, FoveatedEncodingConfig, MediacodecPropType, MediacodecProperty, UpscalingConfig,
+    CodecType, FoveatedEncodingConfig, FoveationMethod, MediacodecPropType, MediacodecProperty,
+    UpscalingConfig,
 };
 use std::{
     cell::RefCell,
@@ -551,7 +552,7 @@ pub extern "C" fn alvr_report_compositor_start(
     out_view_params: *mut AlvrViewParams,
 ) {
     if let Some(context) = &*CLIENT_CORE_CONTEXT.lock() {
-        let view_params =
+        let (view_params, _center_shift, _center_size) =
             context.report_compositor_start(Duration::from_nanos(target_timestamp_ns));
 
         unsafe {
@@ -683,6 +684,8 @@ pub extern "C" fn alvr_start_stream_opengl(config: AlvrStreamConfig) {
     let swapchain_textures =
         convert_swapchain_array(config.swapchain_textures, config.swapchain_length);
     let foveated_encoding = config.enable_foveation.then_some(FoveatedEncodingConfig {
+        method: FoveationMethod::DAADT2,
+        frw_magnitude: 4.66,
         force_enable: true,
         center_size_x: config.foveation_center_size_x,
         center_size_y: config.foveation_center_size_y,
@@ -709,6 +712,8 @@ pub extern "C" fn alvr_start_stream_opengl(config: AlvrStreamConfig) {
         false, // TODO: limited range fix config
         1.0,   // TODO: encoding gamma config
         upscaling,
+        true,
+        true,
     )));
 }
 
@@ -804,6 +809,9 @@ pub extern "C" fn alvr_render_stream_opengl(
                         },
                     },
                 ],
+                None,
+                None,
+                None,
                 None,
             );
         }

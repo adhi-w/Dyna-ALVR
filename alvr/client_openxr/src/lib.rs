@@ -285,8 +285,8 @@ pub fn entry_point() {
         assert_eq!(views_config.len(), 2);
 
         let default_view_resolution = UVec2::new(
-            views_config[0].recommended_image_rect_width,
-            views_config[0].recommended_image_rect_height,
+            views_config[0].max_image_rect_width,
+            views_config[0].max_image_rect_height,
         );
 
         let max_view_resolution = UVec2::new(

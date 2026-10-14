@@ -17,15 +17,20 @@ pub enum ReleaseFlavor {
 pub fn generate_licenses() -> String {
     let sh = Shell::new().unwrap();
 
-    cmd!(sh, "cargo install cargo-about --version 0.6.4")
+    cmd!(sh, "cargo install cargo-about --version 0.8.4 --locked")
         .run()
         .unwrap();
 
     let licenses_template = afs::crate_dir("xtask").join("licenses_template.hbs");
 
-    cmd!(sh, "cargo about generate {licenses_template}")
-        .read()
-        .unwrap()
+    let temp_dir_guard = sh.create_temp_dir().unwrap();
+    let output_file = temp_dir_guard.path().join("dependencies.html");
+
+    cmd!(sh, "cargo about generate {licenses_template} -o {output_file}")
+        .run()
+        .unwrap();
+
+    sh.read_file(output_file).unwrap()
 }
 
 pub fn include_licenses(root_path: &Path, gpl: bool) {

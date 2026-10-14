@@ -13,6 +13,11 @@ static FFR_SHADER_COMP_SPV: &[u8] = include_bytes!("../cpp/platform/linux/shader
 static RGBTOYUV420_SHADER_COMP_SPV: &[u8] =
     include_bytes!("../cpp/platform/linux/shader/rgbtoyuv420.comp.spv");
 
+static AADT2_CSO: &[u8] = include_bytes!("../cpp/platform/win32/AADT2PixelShader.cso");
+static AADT3_CSO: &[u8] = include_bytes!("../cpp/platform/win32/AADT3PixelShader.cso");
+static FRW_CSO: &[u8] = include_bytes!("../cpp/platform/win32/FRWPixelShader.cso");
+
+
 pub fn initialize_shaders() {
     unsafe {
         crate::FRAME_RENDER_VS_CSO_PTR = FRAME_RENDER_VS_CSO.as_ptr();
@@ -35,5 +40,11 @@ pub fn initialize_shaders() {
         crate::FFR_SHADER_COMP_SPV_LEN = FFR_SHADER_COMP_SPV.len() as _;
         crate::RGBTOYUV420_SHADER_COMP_SPV_PTR = RGBTOYUV420_SHADER_COMP_SPV.as_ptr();
         crate::RGBTOYUV420_SHADER_COMP_SPV_LEN = RGBTOYUV420_SHADER_COMP_SPV.len() as _;
+        crate::AADT2_CSO_PTR = AADT2_CSO.as_ptr();
+        crate::AADT2_CSO_LEN = AADT2_CSO.len() as _;
+        crate::AADT3_CSO_PTR = AADT3_CSO.as_ptr();
+        crate::AADT3_CSO_LEN = AADT3_CSO.len() as _;
+        crate::FRW_CSO_PTR = FRW_CSO.as_ptr();
+        crate::FRW_CSO_LEN = FRW_CSO.len() as _;
     }
 }

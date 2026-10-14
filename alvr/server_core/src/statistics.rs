@@ -56,6 +56,7 @@ pub struct StatisticsManager {
     last_vsync_time: Instant,
     frame_interval: Duration,
     last_throughput_directives: BitrateDirectives,
+    last_network_latency: Duration,
 }
 
 impl StatisticsManager {
@@ -86,7 +87,12 @@ impl StatisticsManager {
             last_vsync_time: Instant::now(),
             frame_interval: nominal_server_frame_interval,
             last_throughput_directives: BitrateDirectives::default(),
+            last_network_latency: Duration::ZERO,
         }
+    }
+
+    pub fn last_network_latency(&self) -> Duration {
+        self.last_network_latency
     }
 
     pub fn report_tracking_received(&mut self, target_timestamp: Duration) {
@@ -212,6 +218,8 @@ impl StatisticsManager {
                     + client_stats.rendering
                     + client_stats.vsync_queue,
             );
+
+            self.last_network_latency = network_latency;
 
             let client_fps =
                 1.0 / Duration::max(client_stats.frame_interval, EPS_INTERVAL).as_secs_f32();

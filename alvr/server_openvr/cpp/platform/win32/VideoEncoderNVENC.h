@@ -34,6 +34,11 @@ private:
 
     std::ofstream fpOut;
     std::shared_ptr<NvEncoder> m_NvNecoder;
+    std::shared_ptr<NvEncoder> m_recordingEncoder;
+
+    NV_ENC_BUFFER_FORMAT m_bufferFormat = NV_ENC_BUFFER_FORMAT_ABGR;
+    uint64_t m_recordingOpenSessionId = 0;
+    bool m_recordingWasLossless = false;
 
     std::shared_ptr<CD3DRender> m_pD3DRender;
 

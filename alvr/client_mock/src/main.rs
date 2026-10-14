@@ -267,7 +267,7 @@ fn client_thread(
 
         thread::sleep(Duration::from_millis(3));
 
-        client_core_context.report_compositor_start(window_output.current_frame_timestamp);
+        let _ = client_core_context.report_compositor_start(window_output.current_frame_timestamp);
 
         thread::sleep(Duration::from_millis(input_lock.emulated_compositor_ms));
 

@@ -10,6 +10,7 @@ use crate::{
 use alvr_common::{
     ALVR_VERSION, AnyhowToCon, ConResult, ConnectionError, ConnectionState, LifecycleState,
     ViewParams, dbg_connection, debug, error, info,
+    glam::Vec2,
     parking_lot::{Condvar, Mutex, RwLock},
     wait_rwlock, warn,
 };
@@ -65,6 +66,8 @@ pub struct ConnectionContext {
     pub statistics_manager: Mutex<Option<StatisticsManager>>,
     pub decoder_callback: Mutex<Option<Box<DecoderCallback>>>,
     pub global_view_params_queue: Mutex<VecDeque<(Duration, [ViewParams; 2])>>,
+    pub ffr_center_shift_queue: Mutex<VecDeque<(Duration, [Vec2; 2])>>,
+    pub ffr_center_size_queue: Mutex<VecDeque<(Duration, Vec2)>>,
     pub max_prediction: RwLock<Duration>,
 }
 
@@ -285,6 +288,28 @@ fn connection_pipeline(
                     return;
                 };
 
+                // Per-frame foveation metadata is embedded in the video header.
+                // This is timestamp-aligned with the corresponding encoded payload.
+                if let Some(shift) = header.center_shift {
+                    {
+                        let ffr_queue_lock = &mut *ctx.ffr_center_shift_queue.lock();
+
+                        ffr_queue_lock.push_back((header.timestamp, shift));
+                        while ffr_queue_lock.len() > 128 {
+                            ffr_queue_lock.pop_front();
+                        }
+                    }
+                }
+
+                if let Some(size) = header.center_size {
+                    let ffr_queue_lock = &mut *ctx.ffr_center_size_queue.lock();
+
+                    ffr_queue_lock.push_back((header.timestamp, size));
+                    while ffr_queue_lock.len() > 128 {
+                        ffr_queue_lock.pop_front();
+                    }
+                }
+
                 if let Some(stats) = &mut *ctx.statistics_manager.lock() {
                     stats.report_video_packet_received(header.timestamp);
                 }
@@ -492,6 +517,9 @@ fn connection_pipeline(
                         event_queue
                             .lock()
                             .push_back(ClientCoreEvent::RealTimeConfig(config));
+                    }
+                    Ok(ServerControlPacket::FFR(_packet)) => {
+                        // Deprecated: foveation center shift is carried in VideoPacketHeader.
                     }
                     Ok(ServerControlPacket::StartStream) => {
                         error!("Unexpected StartStream paceket");

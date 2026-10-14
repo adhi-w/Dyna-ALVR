@@ -20,8 +20,9 @@ use alvr_common::{
 use alvr_events::{AdbEvent, ButtonEvent, EventType};
 use alvr_packets::{
     AUDIO, ClientConnectionResult, ClientConnectionsAction, ClientControlPacket, ClientStatistics,
-    HAPTICS, NegotiatedStreamingConfig, NegotiatedStreamingConfigExt, RealTimeConfig, STATISTICS,
-    ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData, VIDEO, VideoPacketHeader,
+    HAPTICS, NegotiatedStreamingConfig, NegotiatedStreamingConfigExt, RealTimeConfig,
+    STATISTICS, ServerControlPacket, StreamConfigPacket, TRACKING, TrackingData, VIDEO,
+    VideoPacketHeader,
 };
 use alvr_session::{
     BodyTrackingSinkConfig, CodecType, ControllersEmulationMode, FrameSize, H264Profile,
@@ -123,8 +124,12 @@ pub fn contruct_openvr_config(session: &SessionConfig) -> OpenvrConfig {
     let mut foveation_center_shift_y = 0.0;
     let mut foveation_edge_ratio_x = 0.0;
     let mut foveation_edge_ratio_y = 0.0;
+    let mut foveation_method = 1u8; // D-AADT2
+    let mut foveation_frw_magnitude = 4.66;
     let enable_foveated_encoding = if let Switch::Enabled(config) = settings.video.foveated_encoding
     {
+        foveation_method = config.method as u8;
+        foveation_frw_magnitude = config.frw_magnitude;
         foveation_center_size_x = config.center_size_x;
         foveation_center_size_y = config.center_size_y;
         foveation_center_shift_x = config.center_shift_x;
@@ -188,12 +193,17 @@ pub fn contruct_openvr_config(session: &SessionConfig) -> OpenvrConfig {
         body_tracking_vive_enabled,
         body_tracking_has_legs,
         enable_foveated_encoding,
+        foveation_method,
+        enable_gaze_prediction: settings.video.enable_gaze_prediction,
+        enable_gaze_hysteresis: settings.video.enable_gaze_hysteresis,
+        enable_dynamic_foveal_sizing: settings.video.dynamic_foveal_sizing.enabled(),
         foveation_center_size_x,
         foveation_center_size_y,
         foveation_center_shift_x,
         foveation_center_shift_y,
         foveation_edge_ratio_x,
         foveation_edge_ratio_y,
+        foveation_frw_magnitude,
         enable_color_correction,
         brightness,
         contrast,
@@ -774,7 +784,9 @@ fn connection_pipeline(
             wired,
             ext_str: String::new(),
         }
-        .with_ext(NegotiatedStreamingConfigExt {}),
+        .with_ext(NegotiatedStreamingConfigExt {
+            emulated_view_resolution: Some(emulated_headset_view_resolution),
+        }),
     )
     .to_con()?;
     proto_socket.send(&stream_config_packet).to_con()?;
@@ -783,6 +795,15 @@ fn connection_pipeline(
         proto_socket.split(STREAMING_RECV_TIMEOUT).to_con()?;
 
     let mut new_openvr_config = contruct_openvr_config(session_manager_lock.session());
+    // Runtime-only toggles: keep them out of restart diffing. They are applied live through
+    // dedicated runtime setters in the OpenVR server layer.
+    new_openvr_config.enable_gaze_prediction = session_manager_lock.session().openvr_config.enable_gaze_prediction;
+    new_openvr_config.enable_gaze_hysteresis = session_manager_lock.session().openvr_config.enable_gaze_hysteresis;
+    new_openvr_config.enable_dynamic_foveal_sizing = session_manager_lock
+        .session()
+        .openvr_config
+        .enable_dynamic_foveal_sizing;
+
     new_openvr_config.eye_resolution_width = transcoding_view_resolution.x;
     new_openvr_config.eye_resolution_height = transcoding_view_resolution.y;
     new_openvr_config.target_eye_resolution_width = emulated_headset_view_resolution.x;
@@ -813,6 +834,8 @@ fn connection_pipeline(
         con_bail!("Got unexpected packet waiting for stream ack");
     }
     dbg_connection!("connection_pipeline: Got StreamReady packet");
+
+    let control_sender = Arc::new(Mutex::new(control_sender));
 
     *ctx.statistics_manager.write() = Some(StatisticsManager::new(
         initial_settings.connection.statistics_history_size,
@@ -1093,8 +1116,6 @@ fn connection_pipeline(
         }
     });
 
-    let control_sender = Arc::new(Mutex::new(control_sender));
-
     let real_time_update_thread = thread::spawn({
         let control_sender = Arc::clone(&control_sender);
         let client_hostname = client_hostname.clone();
@@ -1300,6 +1321,40 @@ fn connection_pipeline(
                     ClientControlPacket::Log { level, message } => {
                         info!("Client {client_hostname}: [{level:?}] {message}")
                     }
+                    ClientControlPacket::Gaze(packet) => {
+                        let shift = [
+                            Vec2::new(
+                                packet.gaze_uv[0].x.clamp(0.0, 1.0),
+                                packet.gaze_uv[0].y.clamp(0.0, 1.0),
+                            ),
+                            Vec2::new(
+                                packet.gaze_uv[1].x.clamp(0.0, 1.0),
+                                packet.gaze_uv[1].y.clamp(0.0, 1.0),
+                            ),
+                        ];
+
+                        *ctx.last_received_foveation_center_shift.write() = Some(shift);
+                    }
+                    ClientControlPacket::GazeMagnitude(packet) => {
+                        *ctx.last_received_gaze_magnitude_uv.write() = Some(packet.magnitude.abs());
+
+                        // Optional independent per-axis margin metric (UV units).
+                        // Can be negative (shrink) or positive (grow).
+                        if packet.magnitude_x.is_finite() && packet.magnitude_y.is_finite() {
+                            *ctx.last_received_gaze_magnitude_uv_xy.write() = Some([
+                                packet.magnitude_x,
+                                packet.magnitude_y,
+                            ]);
+                        }
+
+                        if packet.predictor_error_x.is_finite() && packet.predictor_error_y.is_finite() {
+                            *ctx.last_received_gaze_predictor_error_uv_xy.write() = Some([
+                                packet.predictor_error_x,
+                                packet.predictor_error_y,
+                            ]);
+                        }
+                    }
+                    ClientControlPacket::GazeLatency(_) => (),
                     ClientControlPacket::KeepAlive | ClientControlPacket::StreamReady => (),
                     ClientControlPacket::ProximityState(headset_is_worn) => {
                         ctx.events_sender

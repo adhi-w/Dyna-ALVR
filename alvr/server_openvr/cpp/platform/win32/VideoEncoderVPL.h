@@ -2,7 +2,7 @@
 
 #include "VideoEncoder.h"
 #include "shared/d3drender.h"
-#include <atlbase.h>
+#include <atlbase.h> // or #include <wrl/client.h>
 #include <d3d11.h>
 #include <dxgi.h>
 #include <vector>

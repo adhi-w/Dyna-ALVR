@@ -11,11 +11,13 @@ use alvr_common::{
     HEAD_ID, Pose, RelaxedAtomic, ViewParams,
     anyhow::Result,
     error,
-    glam::{UVec2, Vec2},
+    glam::{Quat, UVec2, Vec2, Vec3},
     parking_lot::RwLock,
 };
 use alvr_graphics::{GraphicsContext, StreamRenderer, StreamViewParams};
-use alvr_packets::{RealTimeConfig, StreamConfig, TrackingData};
+use alvr_packets::{
+    GazeMagnitudePacket, GazePacket, RealTimeConfig, StreamConfig, TrackingData,
+};
 use alvr_session::{
     ClientsideFoveationConfig, ClientsideFoveationMode, ClientsidePostProcessingConfig, CodecType,
     FoveatedEncodingConfig, MediacodecProperty, PassthroughMode, UpscalingConfig,
@@ -32,8 +34,39 @@ use std::{
 
 const DECODER_MAX_TIMEOUT_MULTIPLIER: f32 = 0.8;
 
+fn project_gaze_to_uv(eyes_combined: Quat, fov: alvr_common::Fov) -> Option<Vec2> {
+    // OpenXR convention: -Z is forward.
+    let dir = (eyes_combined * Vec3::new(0.0, 0.0, -1.0)).normalize_or_zero();
+    if dir.z >= -1e-5 {
+        return None;
+    }
+
+    // Intersect ray with the plane z = -1 in view space.
+    let x_proj = dir.x / (-dir.z);
+    let y_proj = dir.y / (-dir.z);
+
+    let tanl = f32::tan(fov.left);
+    let tanr = f32::tan(fov.right);
+    let tanu = f32::tan(fov.up);
+    let tand = f32::tan(fov.down);
+
+    let width = tanr - tanl;
+    let height = tanu - tand;
+    if width.abs() < 1e-6 || height.abs() < 1e-6 {
+        return None;
+    }
+
+    // u: right, v: down (texture UV convention)
+    let u = ((x_proj - tanl) / width).clamp(0.0, 1.0);
+    let v_up = ((y_proj - tand) / height).clamp(0.0, 1.0);
+    let v = /* 1.0 - */ v_up;
+
+    Some(Vec2::new(u, v))
+}
+
 pub struct ParsedStreamConfig {
     pub view_resolution: UVec2,
+    pub emulated_view_resolution: Option<UVec2>,
     pub refresh_rate_hint: f32,
     pub encoding_gamma: f32,
     pub enable_hdr: bool,
@@ -47,12 +80,21 @@ pub struct ParsedStreamConfig {
     pub buffering_history_weight: f32,
     pub decoder_options: Vec<(String, MediacodecProperty)>,
     pub interaction_sources: InteractionSourcesConfig,
+    pub show_eyes_debug_markers: bool,
+    pub show_foveal_box_debug_marker: bool,
 }
 
 impl ParsedStreamConfig {
     pub fn new(config: &StreamConfig) -> Self {
+        let emulated_view_resolution = config
+            .negotiated_config
+            .ext()
+            .ok()
+            .and_then(|ext| ext.emulated_view_resolution);
+
         Self {
             view_resolution: config.negotiated_config.view_resolution,
+            emulated_view_resolution,
             refresh_rate_hint: config.negotiated_config.refresh_rate_hint,
             encoding_gamma: config.negotiated_config.encoding_gamma,
             enable_hdr: config.negotiated_config.enable_hdr,
@@ -80,6 +122,8 @@ impl ParsedStreamConfig {
             buffering_history_weight: config.settings.video.buffering_history_weight,
             decoder_options: config.settings.video.mediacodec_extra_options.clone(),
             interaction_sources: InteractionSourcesConfig::new(config),
+            show_eyes_debug_markers: config.settings.video.show_eyes_debug_markers,
+            show_foveal_box_debug_marker: config.settings.video.show_foveal_box_debug_marker,
         }
     }
 }
@@ -97,6 +141,7 @@ pub struct StreamContext {
     config: ParsedStreamConfig,
     target_view_resolution: UVec2,
     renderer: StreamRenderer,
+    latest_gaze_uv: Arc<RwLock<Option<[Vec2; 2]>>>,
     decoder: Option<(VideoDecoderConfig, VideoDecoderSource)>,
     use_custom_reprojection: bool,
 }
@@ -150,10 +195,14 @@ impl StreamContext {
             None
         };
 
-        let target_view_resolution = alvr_graphics::compute_target_view_resolution(
-            config.view_resolution,
-            &config.upscaling,
-        );
+        // `config.view_resolution` is the transcoding/decoded resolution.
+        // Prefer presenting at the server-side emulated resolution when available.
+        let mut target_view_resolution = config
+            .emulated_view_resolution
+            .unwrap_or_else(|| {
+                alvr_graphics::compute_target_view_resolution(config.view_resolution, &config.upscaling)
+            });
+        target_view_resolution = UVec2::min(target_view_resolution, core_ctx.max_view_resolution());
         let format = graphics::swapchain_format(&gfx_ctx, &xr_session, config.enable_hdr);
 
         let swapchains = [
@@ -201,6 +250,8 @@ impl StreamContext {
             core_ctx.platform() != Platform::SamsungGalaxyXR && !config.enable_hdr,
             config.encoding_gamma,
             config.upscaling.clone(),
+            config.show_eyes_debug_markers,
+            config.show_foveal_box_debug_marker,
         );
 
         {
@@ -228,6 +279,8 @@ impl StreamContext {
             xr::ReferenceSpaceType::VIEW,
         ));
 
+        let latest_gaze_uv = Arc::new(RwLock::new(None));
+
         let mut this = StreamContext {
             use_custom_reprojection: core_ctx.platform().is_yvr(),
             core_context: core_ctx,
@@ -242,6 +295,7 @@ impl StreamContext {
             config,
             target_view_resolution,
             renderer,
+            latest_gaze_uv,
             decoder: None,
         };
 
@@ -287,6 +341,7 @@ impl StreamContext {
             let view_reference_space = Arc::clone(&self.view_reference_space);
             let refresh_rate = self.config.refresh_rate_hint;
             let running = Arc::clone(&self.input_thread_running);
+            let latest_gaze_uv = Arc::clone(&self.latest_gaze_uv);
             move || {
                 stream_input_loop(
                     &core_ctx,
@@ -295,6 +350,7 @@ impl StreamContext {
                     &stage_reference_space,
                     &view_reference_space,
                     refresh_rate,
+                    latest_gaze_uv,
                     running,
                 )
             }
@@ -356,15 +412,16 @@ impl StreamContext {
             }
         }
 
-        let (timestamp, view_params, buffer_ptr) =
+        let (timestamp, view_params, buffer_ptr, center_shift_uv, center_size_uv) =
             if let Some((timestamp, buffer_ptr)) = frame_result {
-                let view_params = self.core_context.report_compositor_start(timestamp);
+                let (view_params, center_shift_uv, center_size_uv) =
+                    self.core_context.report_compositor_start(timestamp);
 
                 self.last_good_view_params = view_params;
 
-                (timestamp, view_params, buffer_ptr)
+                (timestamp, view_params, buffer_ptr, center_shift_uv, center_size_uv)
             } else {
-                (vsync_time, self.last_good_view_params, ptr::null_mut())
+                (vsync_time, self.last_good_view_params, ptr::null_mut(), None, None)
             };
 
         let left_swapchain_idx = self.swapchains[0].acquire_image().unwrap();
@@ -421,6 +478,76 @@ impl StreamContext {
             openxr_display_time = vsync_time;
         }
 
+        let gaze_uv = *self.latest_gaze_uv.read();
+
+        // Gaze magnitude for dynamic foveal ROI sizing:
+        // If the real-time gaze is close to the foveal ROI edge (within 5% margin), measure the
+        // overflow past the inner margin relative to the server-provided center shift.
+        //
+        // Note: per-frame center size might be unavailable depending on the stream metadata.
+        // In that case, fall back to the negotiated base center size from the foveated encoding
+        // config (when present).
+        if let (Some(gaze_uv), Some(center_shift_uv)) = (gaze_uv, center_shift_uv) {
+            const BORDER_FRAC: f32 = 0.05;
+
+            let base_center_size = self
+                .config
+                .foveated_encoding_config
+                .as_ref()
+                .map(|c| Vec2::new(c.center_size_x, c.center_size_y))
+                .unwrap_or(Vec2::new(0.0, 0.0));
+
+            let center_size_uv = center_size_uv.unwrap_or(base_center_size);
+            if center_size_uv.x > 0.0 && center_size_uv.y > 0.0 {
+
+            let half_size = 0.5 * center_size_uv;
+            let inner_half_size = half_size * (1.0 - BORDER_FRAC);
+
+            // Signed per-axis margin to the inner boundary:
+            // +: gaze is outside/near the boundary => grow center size
+            // -: gaze is safely inside => shrink center size
+            let signed_margin_for_eye = |g: Vec2, c: Vec2| -> Vec2 {
+                let dx = (g.x - c.x).abs();
+                let dy = (g.y - c.y).abs();
+
+                Vec2::new(dx - inner_half_size.x, dy - inner_half_size.y)
+            };
+
+            let m0 = signed_margin_for_eye(gaze_uv[0], center_shift_uv[0]);
+            let m1 = signed_margin_for_eye(gaze_uv[1], center_shift_uv[1]);
+
+            // Combine per-eye into per-axis using max:
+            // - For growth (positive), this grows enough for either eye.
+            // - For shrink (negative), this shrinks conservatively based on the eye closest
+            //   to the boundary (less negative wins).
+            let margin_xy = Vec2::new(m0.x.max(m1.x), m0.y.max(m1.y));
+
+            // Legacy scalar magnitude stays non-negative for compatibility/logging.
+            // Interpret it as a grow-only signal.
+            let grow_only_xy = Vec2::new(margin_xy.x.max(0.0), margin_xy.y.max(0.0));
+
+            let combined = grow_only_xy.length();
+            let combined_x = margin_xy.x;
+            let combined_y = margin_xy.y;
+
+            // Predictor residual is a direct signed gaze-anchor error and is
+            // intentionally separate from the ROI margin heuristic above.
+            let predictor_error0 = gaze_uv[0] - center_shift_uv[0];
+            let predictor_error1 = gaze_uv[1] - center_shift_uv[1];
+            let predictor_error_xy = 0.5 * (predictor_error0 + predictor_error1);
+
+            self.core_context.send_gaze_magnitude(GazeMagnitudePacket {
+                timestamp,
+                magnitude: combined,
+                magnitude_x: combined_x,
+                magnitude_y: combined_y,
+                predictor_error_x: predictor_error_xy.x,
+                predictor_error_y: predictor_error_xy.y,
+            });
+
+            }
+        }
+
         self.renderer.render(
             buffer_ptr,
             [
@@ -436,6 +563,9 @@ impl StreamContext {
                 },
             ],
             self.config.passthrough.as_ref(),
+            gaze_uv,
+            center_shift_uv,
+            center_size_uv,
         );
 
         self.swapchains[0].release_image().unwrap();
@@ -521,6 +651,7 @@ fn stream_input_loop(
     stage_reference_space: &xr::Space,
     view_reference_space: &xr::Space,
     refresh_rate: f32,
+    latest_gaze_uv: Arc<RwLock<Option<[Vec2; 2]>>>,
     running: Arc<RelaxedAtomic>,
 ) {
     let mut last_controller_poses = [Pose::IDENTITY; 2];
@@ -618,6 +749,27 @@ fn stream_input_loop(
             view_reference_space,
             now,
         );
+
+        let gaze_uv_lr = face.eyes_combined.and_then(|q| {
+            Some([
+                project_gaze_to_uv(q, last_view_params[0].fov)?,
+                project_gaze_to_uv(q, last_view_params[1].fov)?,
+            ])
+        });
+
+        *latest_gaze_uv.write() = gaze_uv_lr;
+
+        if let Some(gaze_uv) = gaze_uv_lr {
+            let center = Vec2::new(0.5, 0.5);
+            let m0 = gaze_uv[0].distance(center);
+            let m1 = gaze_uv[1].distance(center);
+
+            core_ctx.send_gaze(GazePacket {
+                timestamp: target_time,
+                gaze_uv,
+                gaze_magnitude: [m0, m1],
+            });
+        }
 
         let body = int_ctx
             .body_source

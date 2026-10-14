@@ -4,6 +4,8 @@ cbuffer FoveationVars {
 	float2 eyeSizeRatio;
 	float2 centerSize;
 	float2 centerShift;
+	float2 centerShift_Left;
+	float2 centerShift_Right;
 	float2 edgeRatio;
 };
 
@@ -14,9 +16,11 @@ float2 TextureToEyeUV(float2 textureUV, bool isRightEye) {
 }
 
 float2 EyeToTextureUV(float2 eyeUV, bool isRightEye) {
-	// saturate is used to avoid color bleeding between the two sides of the texture or with the black border when filtering
-	//float2 clampedUV = saturate(eyeUV);
-	// left: x / 2; right 1 - (x / 2)
-	//return float2(clampedUV.x / 2. + float(isRightEye) * (1. - clampedUV.x), clampedUV.y);
-	return float2(eyeUV.x * .5 + float(isRightEye) * (1. - eyeUV.x), eyeUV.y);
+	// Clamp before packing back into the stereo texture to avoid color bleeding
+	// across the eye seam or from the outer border when filtering.
+	float2 clampedUV = saturate(eyeUV);
+
+	// left: x / 2; right: 1 - (x / 2)
+	return float2(clampedUV.x * 0.5 + float(isRightEye) * (1. - clampedUV.x), clampedUV.y);
+
 }

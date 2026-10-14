@@ -29,9 +29,22 @@ fn bool_modifier(target_path: &str, value: bool) -> PresetModifier {
     }
 }
 
-pub fn resolution_schema() -> PresetSchemaNode {
+const RESOLUTION_OPTIONS: [(&str, &str); 10] = [
+    ("Extra Low (width: 1792)", "896"),
+    ("Super Low (width: 2112)", "1056"),
+    ("Very Low (width: 3072)", "1536"),
+    ("Mid Low (width: 3200)", "1600"),
+    ("Low (width: 3712)", "1856"),
+    ("Medium (width: 4288)", "2144"),
+    ("High (width: 5130)", "2565"),
+    ("High (width: 5184)", "2592"),
+    ("Ultra (width: 5632)", "2816"),
+    ("Extreme (width: 6080)", "3040"),
+];
+
+pub fn transcoding_resolution_schema() -> PresetSchemaNode {
     PresetSchemaNode::HigherOrderChoice(HigherOrderChoiceSchema {
-        name: "Resolution".into(),
+        name: "Transcoding resolution".into(),
         strings: [(
             "help".into(),
             "Choosing too high resolution (commonly 'High (width: 5184)') may result in high latency or black screen.".into(),
@@ -39,14 +52,7 @@ pub fn resolution_schema() -> PresetSchemaNode {
         .into_iter()
         .collect(),
         flags: ["steamvr-restart".into()].into_iter().collect(),
-        options: [
-            ("Very Low (width: 3072)", "1536"),
-            ("Low (width: 3712)", "1856"),
-            ("Medium (width: 4288)", "2144"),
-            ("High (width: 5184)", "2592"),
-            ("Ultra (width: 5632)", "2816"),
-            ("Extreme (width: 6080)", "3040"),
-        ]
+        options: RESOLUTION_OPTIONS
         .into_iter()
         .map(|(key, value)| HigherOrderChoiceOption {
             display_name: key.into(),
@@ -63,6 +69,32 @@ pub fn resolution_schema() -> PresetSchemaNode {
                     "session_settings.video.transcoding_view_resolution.Absolute.height.set",
                     false,
                 ),
+            ]
+            .into_iter()
+            .collect(),
+            content: None,
+        })
+        .collect(),
+        default_option_display_name: "Mid Low (width: 3200)".into(),
+        gui: ChoiceControlType::Dropdown,
+    })
+}
+
+pub fn emulated_resolution_schema() -> PresetSchemaNode {
+    PresetSchemaNode::HigherOrderChoice(HigherOrderChoiceSchema {
+        name: "Emulated (render) resolution".into(),
+        strings: [(
+            "help".into(),
+            "This affects the recommended render target size reported to SteamVR and the server-side composition resolution.".into(),
+        )]
+        .into_iter()
+        .collect(),
+        flags: ["steamvr-restart".into()].into_iter().collect(),
+        options: RESOLUTION_OPTIONS
+        .into_iter()
+        .map(|(key, value)| HigherOrderChoiceOption {
+            display_name: key.into(),
+            modifiers: [
                 string_modifier(
                     "session_settings.video.emulated_headset_view_resolution.variant",
                     "Absolute",
@@ -81,7 +113,7 @@ pub fn resolution_schema() -> PresetSchemaNode {
             content: None,
         })
         .collect(),
-        default_option_display_name: "Medium (width: 4288)".into(),
+        default_option_display_name: "High (width: 5130)".into(),
         gui: ChoiceControlType::Dropdown,
     })
 }
@@ -137,7 +169,7 @@ H264 encoding is currently NOT supported on Intel ARC GPUs on Windows."
                 content: None,
             })
             .collect(),
-        default_option_display_name: "H264".into(),
+            default_option_display_name: "HEVC".into(),
         gui: ChoiceControlType::ButtonGroup,
     })
 }

@@ -305,7 +305,9 @@ impl DataSources {
                                 ServerRequest::CaptureFrame
                                 | ServerRequest::InsertIdr
                                 | ServerRequest::StartRecording
-                                | ServerRequest::StopRecording => {
+                                | ServerRequest::StopRecording
+                                | ServerRequest::StartGtRecording(_)
+                                | ServerRequest::StopGtRecording => {
                                     warn!(
                                         "Cannot perform action, streamer (SteamVR) is not connected."
                                     )
@@ -367,6 +369,10 @@ impl DataSources {
                                 ServerRequest::InsertIdr => post("insert-idr"),
                                 ServerRequest::StartRecording => post("recording/start"),
                                 ServerRequest::StopRecording => post("recording/stop"),
+                                ServerRequest::StartGtRecording(config) => {
+                                    post_body(&rq, &base_uri, "gt-recording/start", Some(config))
+                                }
+                                ServerRequest::StopGtRecording => post("gt-recording/stop"),
                                 ServerRequest::RestartSteamvr => post("restart-steamvr"),
                                 ServerRequest::ShutdownSteamvr => post("shutdown-steamvr"),
                             }

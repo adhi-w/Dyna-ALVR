@@ -17,6 +17,7 @@ use axum::{
     response::Response,
     routing,
 };
+use serde::Deserialize;
 use serde_json as json;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tokio::{net::TcpListener, sync::broadcast::error::RecvError};
@@ -85,6 +86,12 @@ pub async fn web_server(connection_context: Arc<ConnectionContext>) -> Result<()
                     Router::new()
                         .route("/start", routing::post(start_recording))
                         .route("/stop", routing::post(stop_recording)),
+                )
+                .nest(
+                    "/gt-recording",
+                    Router::new()
+                        .route("/start", routing::post(start_gt_recording))
+                        .route("/stop", routing::post(stop_gt_recording)),
                 )
                 .nest(
                     "/firewall-rules",
@@ -202,6 +209,43 @@ async fn start_recording(State(ctx): State<Arc<ConnectionContext>>) {
 
 async fn stop_recording(State(ctx): State<Arc<ConnectionContext>>) {
     *ctx.video_recording_file.lock() = None;
+}
+
+#[derive(Deserialize)]
+enum GtRecordingMode {
+    LogsOnly,
+    Lossless,
+    Compressed,
+}
+
+#[derive(Deserialize)]
+struct StartGtRecordingRequest {
+    filename_suffix: String,
+    mode: GtRecordingMode,
+    duration_minutes: u32,
+}
+
+async fn start_gt_recording(
+    State(ctx): State<Arc<ConnectionContext>>,
+    Json(request): Json<StartGtRecordingRequest>,
+) {
+    let mode = match request.mode {
+        GtRecordingMode::LogsOnly => 0,
+        GtRecordingMode::Lossless => 1,
+        GtRecordingMode::Compressed => 2,
+    };
+
+    ctx.events_sender
+        .send(ServerCoreEvent::GtRecordingStart {
+            mode,
+            duration_minutes: request.duration_minutes,
+            filename_suffix: request.filename_suffix,
+        })
+        .ok();
+}
+
+async fn stop_gt_recording(State(ctx): State<Arc<ConnectionContext>>) {
+    ctx.events_sender.send(ServerCoreEvent::GtRecordingStop).ok();
 }
 
 async fn add_firewall_rules() {

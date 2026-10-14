@@ -454,9 +454,39 @@ pub struct ClientsideFoveationConfig {
     pub vertical_offset_deg: f32,
 }
 
+#[repr(u8)]
+#[derive(SettingsSchema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Default)]
+#[schema(gui = "button_group")]
+pub enum FoveationMethod {
+    Vanilla = 0,
+    #[default]
+    #[schema(strings(display_name = "D-AADT2"))]
+    DAADT2 = 1,
+    #[schema(strings(display_name = "D-AADT3"))]
+    DAADT3 = 2,
+    #[schema(strings(display_name = "D-FRW"))]
+    DFRW = 3,
+    #[schema(strings(display_name = "GT"))]
+    GT = 4,
+}
+
 #[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq)]
 #[schema(collapsible)]
 pub struct FoveatedEncodingConfig {
+    #[serde(default)]
+    #[schema(strings(display_name = "Method"))]
+    #[schema(flag = "steamvr-restart")]
+    pub method: FoveationMethod,
+
+    // Used only for D-FRW.
+    #[schema(strings(
+        display_name = "FRW magnitude",
+        help = "Controls the strength of the D-FRW tangent warp. Higher values increase peripheral compression."
+    ))]
+    #[schema(gui(slider(min = 0.1, max = 10.0, step = 0.01)))]
+    #[schema(flag = "steamvr-restart")]
+    pub frw_magnitude: f32,
+
     #[schema(strings(help = "Force enable on smartphone clients"))]
     pub force_enable: bool,
 
@@ -471,12 +501,12 @@ pub struct FoveatedEncodingConfig {
     pub center_size_y: f32,
 
     #[schema(strings(display_name = "Center shift X"))]
-    #[schema(gui(slider(min = -1.0, max = 1.0, step = 0.01)))]
+    #[schema(gui(slider(min = 0.0, max = 1.0, step = 0.01)))]
     #[schema(flag = "steamvr-restart")]
     pub center_shift_x: f32,
 
     #[schema(strings(display_name = "Center shift Y"))]
-    #[schema(gui(slider(min = -1.0, max = 1.0, step = 0.01)))]
+    #[schema(gui(slider(min = 0.0, max = 1.0, step = 0.01)))]
     #[schema(flag = "steamvr-restart")]
     pub center_shift_y: f32,
 
@@ -519,9 +549,9 @@ pub struct ColorCorrectionConfig {
 #[derive(SettingsSchema, Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Default)]
 #[schema(gui = "button_group")]
 pub enum CodecType {
-    #[default]
     #[schema(strings(display_name = "h264"))]
     H264 = 0,
+    #[default]
     #[schema(strings(display_name = "HEVC"))]
     Hevc = 1,
     #[schema(strings(display_name = "AV1"))]
@@ -689,8 +719,81 @@ pub struct UpscalingConfig {
     pub upscale_factor: f32,
 }
 
+#[derive(SettingsSchema, Serialize, Deserialize, Clone, PartialEq, Debug)]
+pub struct DynamicFovealSizingConfig {
+    #[schema(strings(
+        display_name = "dyn_min_size",
+        help = "Minimum dynamic center size clamp for Dynamic Foveal Sizing (normalized [0,1])."
+    ))]
+    #[schema(gui(text_box))]
+    pub dyn_min_size: f32,
+
+    #[schema(strings(
+        display_name = "dyn_max_size",
+        help = "Maximum dynamic center size clamp for Dynamic Foveal Sizing (normalized [0,1])."
+    ))]
+    #[schema(gui(text_box))]
+    pub dyn_max_size: f32,
+
+    #[schema(strings(
+        display_name = "grow_rate",
+        help = "Smoothing rate for growing the dynamic center size (0=no growth, 1=instant)."
+    ))]
+    #[schema(gui(text_box))]
+    pub grow_rate: f32,
+
+    #[schema(strings(
+        display_name = "shrink_rate",
+        help = "Smoothing rate for shrinking the dynamic center size (0=no shrink, 1=instant)."
+    ))]
+    #[schema(gui(text_box))]
+    pub shrink_rate: f32,
+}
+
+fn default_dynamic_foveal_sizing() -> Switch<DynamicFovealSizingConfig> {
+    Switch::Disabled
+}
+
 #[derive(SettingsSchema, Serialize, Deserialize, Clone)]
 pub struct VideoConfig {
+    #[schema(strings(
+        display_name = "Show gaze/center-shift debug markers",
+        help = "Overlays debug markers on the client video stream (gaze marker in red and foveation center-shift marker in blue). Applies on next stream start."
+    ))]
+    #[serde(default)]
+    pub show_eyes_debug_markers: bool,
+
+    #[schema(strings(
+        display_name = "Show foveal ROI box debug marker",
+        help = "Overlays a yellow rectangle outline showing the foveal ROI (based on center size + center shift). Applies on next stream start."
+    ))]
+    #[serde(default)]
+    pub show_foveal_box_debug_marker: bool,
+
+    #[schema(strings(
+        display_name = "Gaze Prediction",
+        help = "Enable server-side gaze prediction for foveated encoding center-shift. Works with or without Hysteresis."
+    ))]
+    #[schema(flag = "real-time")]
+    #[serde(default)]
+    pub enable_gaze_prediction: bool,
+
+    #[schema(strings(
+        display_name = "Hysteresis",
+        help = "Enable locking/hysteresis behavior for the gaze predictor. Has no effect if Prediction is disabled."
+    ))]
+    #[schema(flag = "real-time")]
+    #[serde(default)]
+    pub enable_gaze_hysteresis: bool,
+
+    #[schema(strings(
+        display_name = "Dynamic Foveal Sizing",
+        help = "Enable dynamic foveal ROI center-size driven by client-reported per-axis margin-to-boundary. Works independently from Prediction/Hysteresis. Only applies for foveation methods D-AADT2/D-AADT3."
+    ))]
+    #[schema(flag = "real-time")]
+    #[serde(default = "default_dynamic_foveal_sizing")]
+    pub dynamic_foveal_sizing: Switch<DynamicFovealSizingConfig>,
+
     #[schema(flag = "real-time")]
     pub passthrough: Switch<PassthroughMode>,
 
@@ -1590,14 +1693,28 @@ pub struct Settings {
 }
 
 pub fn session_settings_default() -> SettingsDefault {
-    let view_resolution = FrameSizeDefault {
+    let transcoding_view_resolution = FrameSizeDefault {
         variant: FrameSizeDefaultVariant::Absolute,
         Scale: 1.0,
         Absolute: FrameSizeAbsoluteDefault {
-            width: 2144,
+            // "Mid Low (width: 3200)"
+            width: 1600,
             height: OptionalDefault {
                 set: false,
-                content: 1072,
+                content: 1760,
+            },
+        },
+    };
+
+    let emulated_view_resolution = FrameSizeDefault {
+        variant: FrameSizeDefaultVariant::Absolute,
+        Scale: 1.0,
+        Absolute: FrameSizeAbsoluteDefault {
+            // High (width: 5130)
+            width: 2565,
+            height: OptionalDefault {
+                set: false,
+                content: 2816,
             },
         },
     };
@@ -1627,6 +1744,19 @@ pub fn session_settings_default() -> SettingsDefault {
 
     SettingsDefault {
         video: VideoConfigDefault {
+            show_eyes_debug_markers: false,
+            show_foveal_box_debug_marker: false,
+            enable_gaze_prediction: false,
+            enable_gaze_hysteresis: false,
+            dynamic_foveal_sizing: SwitchDefault {
+                enabled: false,
+                content: DynamicFovealSizingConfigDefault {
+                    dyn_min_size: 0.25,
+                    dyn_max_size: 0.6,
+                    grow_rate: 0.20,
+                    shrink_rate: 0.02,
+                },
+            },
             passthrough: SwitchDefault {
                 enabled: false,
                 content: PassthroughModeDefault {
@@ -1679,8 +1809,8 @@ pub fn session_settings_default() -> SettingsDefault {
                 },
             },
             adapter_index: 0,
-            transcoding_view_resolution: view_resolution.clone(),
-            emulated_headset_view_resolution: view_resolution,
+            transcoding_view_resolution,
+            emulated_headset_view_resolution: emulated_view_resolution,
             preferred_fps: 72.,
             max_buffering_frames: 2.0,
             buffering_history_weight: 0.90,
@@ -1688,7 +1818,7 @@ pub fn session_settings_default() -> SettingsDefault {
             bitrate: BitrateConfigDefault {
                 gui_collapsed: false,
                 mode: BitrateModeDefault {
-                    ConstantMbps: 30,
+                    ConstantMbps: 50, //30,
                     Adaptive: BitrateModeAdaptiveDefault {
                         gui_collapsed: true,
                         saturation_multiplier: 0.95,
@@ -1732,7 +1862,7 @@ pub fn session_settings_default() -> SettingsDefault {
                 image_corruption_fix: false,
             },
             preferred_codec: CodecTypeDefault {
-                variant: CodecTypeDefaultVariant::H264,
+                variant: CodecTypeDefaultVariant::Hevc,
             },
             encoder_config: EncoderConfigDefault {
                 gui_collapsed: true,
@@ -1840,13 +1970,17 @@ pub fn session_settings_default() -> SettingsDefault {
                 enabled: true,
                 content: FoveatedEncodingConfigDefault {
                     gui_collapsed: true,
+                    method: FoveationMethodDefault {
+                        variant: FoveationMethodDefaultVariant::DAADT2,
+                    },
+                    frw_magnitude: 4.66,
                     force_enable: false,
-                    center_size_x: 0.45,
-                    center_size_y: 0.4,
-                    center_shift_x: 0.4,
-                    center_shift_y: 0.1,
-                    edge_ratio_x: 4.,
-                    edge_ratio_y: 5.,
+                    center_size_x: 0.25,
+                    center_size_y: 0.25,
+                    center_shift_x: 0.5,
+                    center_shift_y: 0.5,
+                    edge_ratio_x: 2.0,
+                    edge_ratio_y: 2.0,
                 },
             },
             clientside_foveation: SwitchDefault {

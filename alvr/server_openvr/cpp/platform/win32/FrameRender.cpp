@@ -98,6 +98,22 @@ bool FrameRender::Startup() {
         return true;
     }
 
+    const bool foveatedEncodingEnabled = Settings::Instance().m_enableFoveatedEncoding;
+
+    // Use full render resolution as the composition input to FFR.
+    // When FFE is off, keep the old encoder-sized path.
+    const uint32_t compositionWidth = (foveatedEncodingEnabled
+            && Settings::Instance().m_recommendedTargetWidth > 0)
+        ? (uint32_t)Settings::Instance().m_recommendedTargetWidth
+        : (uint32_t)Settings::Instance().m_renderWidth;
+
+    const uint32_t compositionHeight = (foveatedEncodingEnabled
+            && Settings::Instance().m_recommendedTargetHeight > 0)
+        ? (uint32_t)Settings::Instance().m_recommendedTargetHeight
+        : (uint32_t)Settings::Instance().m_renderHeight;
+
+    const float compositionEyeWidth = (float)compositionWidth / 2.0f;
+
     //
     // Create staging texture
     // This is input texture of Video Encoder and is render target of both eyes.
@@ -105,17 +121,21 @@ bool FrameRender::Startup() {
 
     D3D11_TEXTURE2D_DESC compositionTextureDesc;
     ZeroMemory(&compositionTextureDesc, sizeof(compositionTextureDesc));
-    compositionTextureDesc.Width = Settings::Instance().m_renderWidth;
-    compositionTextureDesc.Height = Settings::Instance().m_renderHeight;
+    compositionTextureDesc.Width = compositionWidth;
+    compositionTextureDesc.Height = compositionHeight;
     compositionTextureDesc.Format = Settings::Instance().m_enableHdr
         ? DXGI_FORMAT_R16G16B16A16_FLOAT
         : DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-    compositionTextureDesc.MipLevels = 1;
+
+    // When FFE is enabled, this full-resolution composition texture is the input to
+    // the foveation shader, so allocate a full mip chain for prefiltering.
+    compositionTextureDesc.MipLevels = foveatedEncodingEnabled ? 0 : 1;    
     compositionTextureDesc.ArraySize = 1;
     compositionTextureDesc.SampleDesc.Count = 1;
     compositionTextureDesc.Usage = D3D11_USAGE_DEFAULT;
     compositionTextureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-
+    compositionTextureDesc.MiscFlags = foveatedEncodingEnabled ? D3D11_RESOURCE_MISC_GENERATE_MIPS : 0;
+    
     ComPtr<ID3D11Texture2D> compositionTexture;
 
     if (FAILED(m_pD3DRender->GetDevice()->CreateTexture2D(
@@ -131,6 +151,18 @@ bool FrameRender::Startup() {
     if (FAILED(hr)) {
         Error("CreateRenderTargetView %p %ls\n", hr, GetErrorStr(hr).c_str());
         return false;
+    }
+
+    // Keep an SRV for the composition texture so we can explicitly GenerateMips()
+    // when FFR samples directly from it (that is, when color correction is disabled).
+    if (foveatedEncodingEnabled) {
+        hr = m_pD3DRender->GetDevice()->CreateShaderResourceView(
+            compositionTexture.Get(), nullptr, &m_pCompositionTextureSRV
+        );
+        if (FAILED(hr)) {
+            Error("CreateShaderResourceView (composition mip chain) %p %ls\n", hr, GetErrorStr(hr).c_str());
+            return false;
+        }
     }
 
     D3D11_DEPTH_STENCIL_DESC depthStencilDesc;
@@ -157,24 +189,24 @@ bool FrameRender::Startup() {
 
     // Left eye viewport
 
-    m_viewportL.Width = (float)Settings::Instance().m_renderWidth / 2.0;
-    m_viewportL.Height = (float)Settings::Instance().m_renderHeight;
+    m_viewportL.Width = compositionEyeWidth;
+    m_viewportL.Height = (float)compositionHeight;
     m_viewportL.MinDepth = 0.0f;
     m_viewportL.MaxDepth = 1.0f;
     m_viewportL.TopLeftX = 0;
     m_viewportL.TopLeftY = 0;
 
     // Right eye viewport
-    m_viewportR.Width = (float)Settings::Instance().m_renderWidth / 2.0;
-    m_viewportR.Height = (float)Settings::Instance().m_renderHeight;
+    m_viewportR.Width = compositionEyeWidth;
+    m_viewportR.Height = (float)compositionHeight;
     m_viewportR.MinDepth = 0.0f;
     m_viewportR.MaxDepth = 1.0f;
-    m_viewportR.TopLeftX = (float)Settings::Instance().m_renderWidth / 2.0;
+    m_viewportR.TopLeftX = compositionEyeWidth;
     m_viewportR.TopLeftY = 0;
 
     // Final composition viewport
-    m_viewport.Width = (float)Settings::Instance().m_renderWidth;
-    m_viewport.Height = (float)Settings::Instance().m_renderHeight;
+    m_viewport.Width = (float)compositionWidth;
+    m_viewport.Height = (float)compositionHeight;
     m_viewport.MinDepth = 0.0f;
     m_viewport.MaxDepth = 1.0f;
     m_viewport.TopLeftX = 0;
@@ -183,20 +215,20 @@ bool FrameRender::Startup() {
     // Left eye scissor
     m_scissorL.bottom = 0.0f;
     m_scissorL.left = 0.0f;
-    m_scissorL.right = (float)Settings::Instance().m_renderWidth / 2.0f;
-    m_scissorL.top = (float)Settings::Instance().m_renderHeight;
+    m_scissorL.right = compositionEyeWidth;
+    m_scissorL.top = (float)compositionHeight;
 
     // Right eye scissor
     m_scissorR.bottom = 0.0f;
-    m_scissorR.left = (float)Settings::Instance().m_renderWidth / 2.0f;
-    m_scissorR.right = (float)Settings::Instance().m_renderWidth;
-    m_scissorR.top = (float)Settings::Instance().m_renderHeight;
+    m_scissorR.left = compositionEyeWidth;
+    m_scissorR.right = (float)compositionWidth;
+    m_scissorR.top = (float)compositionHeight;
 
     // Final composition scissor
     m_scissor.bottom = 0.0f;
     m_scissor.left = 0.0f;
-    m_scissor.right = (float)Settings::Instance().m_renderWidth;
-    m_scissor.top = (float)Settings::Instance().m_renderHeight;
+    m_scissor.right = (float)compositionWidth;
+    m_scissor.top = (float)compositionHeight;
 
     //
     // Compile shaders
@@ -401,10 +433,11 @@ bool FrameRender::Startup() {
 
         ComPtr<ID3D11Texture2D> colorCorrectedTexture = CreateTexture(
             m_pD3DRender->GetDevice(),
-            Settings::Instance().m_renderWidth,
-            Settings::Instance().m_renderHeight,
+            compositionWidth,
+            compositionHeight,
             Settings::Instance().m_enableHdr ? DXGI_FORMAT_R16G16B16A16_FLOAT
-                                             : DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+                                            : DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+            enableFFE
         );
 
         struct ColorCorrection {
@@ -418,7 +451,7 @@ bool FrameRender::Startup() {
             float _align;
         };
         ColorCorrection colorCorrectionStruct = {
-            (float)Settings::Instance().m_renderWidth, (float)Settings::Instance().m_renderHeight,
+            (float)compositionWidth, (float)compositionHeight,
             Settings::Instance().m_brightness,         Settings::Instance().m_contrast + 1.f,
             Settings::Instance().m_saturation + 1.f,   Settings::Instance().m_gamma,
             Settings::Instance().m_sharpening
@@ -438,10 +471,24 @@ bool FrameRender::Startup() {
         m_pStagingTexture = colorCorrectedTexture;
     }
 
-    enableFFE = Settings::Instance().m_enableFoveatedEncoding;
+    enableFFE = foveatedEncodingEnabled;
     if (enableFFE) {
         m_ffr = std::make_unique<FFR>(m_pD3DRender->GetDevice());
-        m_ffr->Initialize(m_pStagingTexture.Get());
+
+        const uint32_t renderEyeWidth = compositionWidth / 2;
+        const uint32_t renderEyeHeight = compositionHeight;
+
+        // Encoder/transmit size stays the configured stream size.
+        const uint32_t encoderEyeWidth = (uint32_t)Settings::Instance().m_renderWidth / 2;
+        const uint32_t encoderEyeHeight = (uint32_t)Settings::Instance().m_renderHeight;
+        
+        m_ffr->Initialize(
+            m_pStagingTexture.Get(),    // now actually full-resolution input
+            renderEyeWidth,
+            renderEyeHeight,
+            encoderEyeWidth,
+            encoderEyeHeight
+        );
 
         m_pStagingTexture = m_ffr->GetOutputTexture();
     }
@@ -559,6 +606,7 @@ bool FrameRender::RenderFrame(
     vr::HmdMatrix34_t poses[],
     int layerCount,
     bool recentering,
+    uint64_t targetTimestampNs,
     const std::string& message,
     const std::string& debugText
 ) {
@@ -865,12 +913,18 @@ bool FrameRender::RenderFrame(
     m_pD3DRender->GetContext()->RSSetViewports(1, &m_viewport);
     m_pD3DRender->GetContext()->RSSetScissorRects(1, &m_scissor);
 
+    // If FFR samples directly from the composition texture (no color-correction pass),
+    // build its mip chain now so the foveation shader can use prefiltered levels.
+    if (enableFFE && !enableColorCorrection && m_pCompositionTextureSRV) {
+        m_pD3DRender->GetContext()->GenerateMips(m_pCompositionTextureSRV.Get());
+    }
+
     if (enableColorCorrection) {
         m_colorCorrectionPipeline->Render();
     }
 
     if (enableFFE) {
-        m_ffr->Render();
+        m_ffr->Render(targetTimestampNs);
     }
 
     if (Settings::Instance().m_enableHdr) {

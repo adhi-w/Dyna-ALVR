@@ -24,7 +24,8 @@ struct TopLevelEntry {
 
 pub struct SettingsTab {
     selected_top_tab_id: String,
-    resolution_preset: PresetControl,
+    transcoding_resolution_preset: PresetControl,
+    emulated_resolution_preset: PresetControl,
     framerate_preset: PresetControl,
     encoder_preset: PresetControl,
     foveation_preset: PresetControl,
@@ -69,7 +70,12 @@ impl SettingsTab {
 
         Self {
             selected_top_tab_id: "presets".into(),
-            resolution_preset: PresetControl::new(builtin_schema::resolution_schema()),
+            transcoding_resolution_preset: PresetControl::new(
+                builtin_schema::transcoding_resolution_schema(),
+            ),
+            emulated_resolution_preset: PresetControl::new(
+                builtin_schema::emulated_resolution_schema(),
+            ),
             framerate_preset: PresetControl::new(builtin_schema::framerate_schema()),
             encoder_preset: PresetControl::new(builtin_schema::encoder_preset_schema()),
             foveation_preset: PresetControl::new(builtin_schema::foveation_preset_schema()),
@@ -89,7 +95,9 @@ impl SettingsTab {
     pub fn update_session(&mut self, session_settings: &SessionSettings) {
         let settings_json = json::to_value(session_settings).unwrap();
 
-        self.resolution_preset
+        self.transcoding_resolution_preset
+            .update_session_settings(&settings_json);
+        self.emulated_resolution_preset
             .update_session_settings(&settings_json);
         self.framerate_preset
             .update_session_settings(&settings_json);
@@ -153,7 +161,11 @@ impl SettingsTab {
                         .num_columns(2)
                         .min_col_width(MIN_COLUMN_SIZE)
                         .show(ui, |ui| {
-                            path_value_pairs.extend(self.resolution_preset.ui(ui));
+                            path_value_pairs
+                                .extend(self.transcoding_resolution_preset.ui(ui));
+                            ui.end_row();
+
+                            path_value_pairs.extend(self.emulated_resolution_preset.ui(ui));
                             ui.end_row();
 
                             path_value_pairs.extend(self.framerate_preset.ui(ui));

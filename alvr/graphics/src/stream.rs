@@ -1,15 +1,15 @@
 use super::{GraphicsContext, MAX_PUSH_CONSTANTS_SIZE, staging::StagingRenderer};
 use alvr_common::{
     ViewParams,
-    glam::{self, Mat4, UVec2, Vec3, Vec4},
+    glam::{self, Mat4, UVec2, Vec2, Vec3, Vec4},
 };
 use alvr_session::{FoveatedEncodingConfig, PassthroughMode, UpscalingConfig};
 use std::{ffi::c_void, iter, mem, rc::Rc};
 use wgpu::{
     BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingResource, BindingType, Color, ColorTargetState, ColorWrites,
-    FragmentState, LoadOp, PipelineCompilationOptions, PipelineLayoutDescriptor, PrimitiveState,
-    PrimitiveTopology, PushConstantRange, RenderPass, RenderPassColorAttachment,
+    BufferBindingType, FragmentState, LoadOp, PipelineCompilationOptions, PipelineLayoutDescriptor,
+    PrimitiveState, PrimitiveTopology, PushConstantRange, RenderPass, RenderPassColorAttachment,
     RenderPassDescriptor, RenderPipeline, RenderPipelineDescriptor, SamplerBindingType,
     SamplerDescriptor, ShaderStages, StoreOp, TextureSampleType, TextureView,
     TextureViewDescriptor, TextureViewDimension, VertexState, include_wgsl,
@@ -50,6 +50,7 @@ pub struct StreamRenderer {
     context: Rc<GraphicsContext>,
     staging_renderer: StagingRenderer,
     pipeline: RenderPipeline,
+    gaze_buffer: wgpu::Buffer,
     views_objects: [ViewObjects; 2],
 }
 
@@ -67,10 +68,19 @@ impl StreamRenderer {
         fix_limited_range: bool,
         encoding_gamma: f32,
         upscaling: Option<UpscalingConfig>,
+        show_eyes_debug_markers: bool,
+        show_foveal_box_debug_marker: bool,
     ) -> Self {
         let device = &context.device;
 
         let target_format = super::gl_format_to_wgpu(target_format);
+
+        let gaze_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 48, // gaze (L/R) + center_shift (L/R) + center_size (shared) + padding
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
             label: None,
@@ -91,6 +101,16 @@ impl StreamRenderer {
                     ty: BindingType::Sampler(SamplerBindingType::Filtering),
                     count: None,
                 },
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Buffer {
+                        ty: BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(wgpu::BufferSize::new(48).unwrap()),
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -98,9 +118,21 @@ impl StreamRenderer {
 
         let mut constants = vec![];
 
+        let enable_center_shift_debug = show_eyes_debug_markers && foveated_encoding.is_some();
+        let enable_foveal_box_debug = show_foveal_box_debug_marker && foveated_encoding.is_some();
+
         constants.extend([
             ("ENABLE_SRGB_CORRECTION", enable_srgb_correction.into()),
             ("ENCODING_GAMMA", encoding_gamma.into()),
+            ("ENABLE_GAZE_DEBUG", show_eyes_debug_markers.into()),
+            (
+                "ENABLE_CENTER_SHIFT_DEBUG",
+                enable_center_shift_debug.into(),
+            ),
+            (
+                "ENABLE_FOVEAL_BOX_DEBUG",
+                enable_foveal_box_debug.into(),
+            ),
         ]);
 
         let staging_resolution = if let Some(foveated_encoding) = foveated_encoding {
@@ -196,6 +228,10 @@ impl StreamRenderer {
                         binding: 1,
                         resource: BindingResource::Sampler(&sampler),
                     },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: gaze_buffer.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -237,6 +273,7 @@ impl StreamRenderer {
             context,
             staging_renderer,
             pipeline,
+            gaze_buffer,
             views_objects: view_objects.try_into().unwrap(),
         }
     }
@@ -248,11 +285,48 @@ impl StreamRenderer {
         hardware_buffer: *mut c_void,
         view_params: [StreamViewParams; 2],
         passthrough: Option<&PassthroughMode>,
+        gaze_uv: Option<[Vec2; 2]>,        
+        center_shift_uv: Option<[Vec2; 2]>,
+        center_size_uv: Option<Vec2>,
     ) {
         // if hardware_buffer is available copy stream to staging texture
         if !hardware_buffer.is_null() {
             self.staging_renderer.render(hardware_buffer);
         }
+
+        /* let gaze_uv = gaze_uv.unwrap_or([Vec2::new(0.5, 0.5), Vec2::new(0.5, 0.5)]);
+        let mut gaze_bytes = [0u8; 16];
+        gaze_bytes[0..4].copy_from_slice(&gaze_uv[0].x.to_le_bytes());
+        gaze_bytes[4..8].copy_from_slice(&gaze_uv[0].y.to_le_bytes());
+        gaze_bytes[8..12].copy_from_slice(&gaze_uv[1].x.to_le_bytes());
+        gaze_bytes[12..16].copy_from_slice(&gaze_uv[1].y.to_le_bytes()); 
+        self.context.queue.write_buffer(&self.gaze_buffer, 0, &gaze_bytes);*/
+
+        let gaze_uv = gaze_uv.unwrap_or([Vec2::new(0.5, 0.5), Vec2::new(0.5, 0.5)]);
+        let center_shift_uv =
+            center_shift_uv.unwrap_or([Vec2::new(0.5, 0.5), Vec2::new(0.5, 0.5)]);
+        // If not provided, send zeros so the shader can fall back to negotiated constants.
+        let center_size_uv = center_size_uv.unwrap_or(Vec2::new(0.0, 0.0));
+
+        let mut bytes = [0u8; 48];
+
+        // gaze left/right
+        bytes[0..4].copy_from_slice(&gaze_uv[0].x.to_le_bytes());
+        bytes[4..8].copy_from_slice(&gaze_uv[0].y.to_le_bytes());
+        bytes[8..12].copy_from_slice(&gaze_uv[1].x.to_le_bytes());
+        bytes[12..16].copy_from_slice(&gaze_uv[1].y.to_le_bytes());
+
+        // center shift left/right
+        bytes[16..20].copy_from_slice(&center_shift_uv[0].x.to_le_bytes());
+        bytes[20..24].copy_from_slice(&center_shift_uv[0].y.to_le_bytes());
+        bytes[24..28].copy_from_slice(&center_shift_uv[1].x.to_le_bytes());
+        bytes[28..32].copy_from_slice(&center_shift_uv[1].y.to_le_bytes());
+
+        // center size (shared for both eyes) + padding
+        bytes[32..36].copy_from_slice(&center_size_uv.x.to_le_bytes());
+        bytes[36..40].copy_from_slice(&center_size_uv.y.to_le_bytes());
+
+        self.context.queue.write_buffer(&self.gaze_buffer, 0, &bytes);
 
         let mut encoder = self
             .context
@@ -456,9 +530,13 @@ pub fn foveated_encoding_shader_constants(
         * (edge_ratio * 2.)
         / edge_size_aligned;
 
-    let foveation_scale = center_size_aligned + (1. - center_size_aligned) / edge_ratio;
-
-    let optimized_view_resolution = foveation_scale * view_resolution;
+    // The client staging texture must match the decoded stream resolution exactly.
+    // The server now keeps the transmitted / decoded resolution fixed to the transcoding
+    // resolution for all foveation methods, and uses the foveation shader only to remap
+    // pixels within that fixed-size frame.
+    //
+    // So on the client, do not derive a smaller staging size from the foveation scale.
+    let optimized_view_resolution = view_resolution;
 
     let optimized_view_resolution_aligned =
         optimized_view_resolution.map(|v| (v / 32.).ceil() * 32.);
@@ -485,8 +563,18 @@ pub fn foveated_encoding_shader_constants(
     let c_right = (c2 * edge_ratio - c2) * (c1 - hi_bound_c + c2 * hi_bound_c)
         / (edge_ratio * (1. - hi_bound_c) * (1. - hi_bound_c));
 
+    let (center_size_x_const, center_size_y_const) =
+        if config.method == alvr_session::FoveationMethod::DFRW {
+            let magnitude = config.frw_magnitude.max(0.01);
+            (magnitude, magnitude)
+        } else {
+            (center_size_aligned.x, center_size_aligned.y)
+        };
+    
+
     let constants = [
         ("ENABLE_FFE", 1.),
+        ("FOVEATION_METHOD", config.method as u8 as f32),
         ("VIEW_WIDTH_RATIO", view_ratio_aligned.x),
         ("VIEW_HEIGHT_RATIO", view_ratio_aligned.y),
         ("EDGE_X_RATIO", edge_ratio.x),
@@ -509,6 +597,8 @@ pub fn foveated_encoding_shader_constants(
         ("B_RIGHT_Y", b_right.y),
         ("C_RIGHT_X", c_right.x),
         ("C_RIGHT_Y", c_right.y),
+        ("CENTER_SIZE_X", center_size_x_const),
+        ("CENTER_SIZE_Y", center_size_y_const),
     ]
     .iter()
     .map(|(k, v)| (*k, *v as f64))

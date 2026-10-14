@@ -154,7 +154,7 @@ void VideoEncoderVPL::InitTransferTex() {
                                              D3D11_RESOURCE_MISC_SHARED };
 
     HRESULT hr
-        = m_pD3DRender->GetDevice()->CreateTexture2D(&transferTexDesc, nullptr, &m_transferTex);
+        = m_pD3DRender->GetDevice()->CreateTexture2D(&transferTexDesc, nullptr, &m_transferTex /*or m_transferTex.ReleaseAndGetAddressOf()*/);
     if (FAILED(hr))
         ERROR_THROW("failed to create transfer texture HR=%p %ls", hr, GetErrorStr(hr).c_str());
 }

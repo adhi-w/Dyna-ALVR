@@ -15,6 +15,14 @@ pub struct Control {
 
 impl Control {
     pub fn new(schema: HigherOrderChoiceSchema) -> Self {
+        let default_variant = schema
+            .options
+            .iter()
+            .find(|option| option.display_name == schema.default_option_display_name)
+            .or_else(|| schema.options.first())
+            .map(|option| option.display_name.clone())
+            .unwrap_or_default();
+
         let modifiers = schema
             .options
             .iter()
@@ -44,13 +52,7 @@ impl Control {
                 strings,
                 flags: schema.flags,
                 content: SchemaNode::Choice {
-                    default: schema
-                        .options
-                        .iter()
-                        .find(|option| option.display_name == schema.default_option_display_name)
-                        .unwrap()
-                        .display_name
-                        .clone(),
+                    default: default_variant,
                     variants: schema
                         .options
                         .into_iter()
@@ -132,7 +134,14 @@ impl Control {
     pub fn ui(&mut self, ui: &mut Ui) -> Vec<PathValuePair> {
         if let Some(desc) = self.control.ui(ui, &mut self.preset_json, false) {
             // todo: handle children requests
-            self.modifiers[desc.value.as_str().unwrap()].clone()
+            if let Some(selected_key) = desc.value.as_str() {
+                self.modifiers
+                    .get(selected_key)
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                vec![]
+            }
         } else {
             vec![]
         }

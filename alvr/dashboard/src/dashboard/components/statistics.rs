@@ -10,7 +10,15 @@ use eframe::{
     epaint::Pos2,
 };
 use statrs::statistics::{self, OrderStatistics};
-use std::{collections::VecDeque, ops::RangeInclusive};
+use std::{
+    collections::VecDeque,
+    fs,
+    ops::RangeInclusive,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use serde_json::json;
 
 const GRAPH_HISTORY_SIZE: usize = 1000;
 const UPPER_QUANTILE: f64 = 0.90;
@@ -22,6 +30,226 @@ fn draw_lines(painter: &Painter, points: Vec<Pos2>, color: Color32) {
 pub struct StatisticsTab {
     history: VecDeque<GraphStatistics>,
     last_statistics_summary: Option<StatisticsSummary>,
+    recording: RecordingState,
+}
+
+#[derive(Default)]
+struct RecordingState {
+    active: bool,
+    filename_suffix: String,
+    graph_samples: Vec<GraphStatistics>,
+    summary_samples: Vec<StatisticsSummary>,
+}
+
+impl RecordingState {
+    fn start(&mut self, filename_suffix: String) {
+        self.active = true;
+        self.filename_suffix = filename_suffix;
+        self.graph_samples.clear();
+        self.summary_samples.clear();
+    }
+
+    fn stop_and_write_json(&mut self) -> Result<PathBuf, String> {
+        if !self.active {
+            return Err("Statistics recording is not active".into());
+        }
+
+        self.active = false;
+
+        let suffix = sanitize_filename_suffix(&self.filename_suffix);
+        let filename = if suffix.is_empty() {
+            "StatsSummary.json".to_string()
+        } else {
+            format!("StatsSummary_{suffix}.json")
+        };
+
+        let log_dir = find_log_dir();
+        fs::create_dir_all(&log_dir).map_err(|e| format!("Failed to create logFiles dir: {e}"))?;
+
+        let path = log_dir.join(filename);
+        let payload = build_stats_median_json(
+            &self.graph_samples,
+            &self.summary_samples,
+            &suffix,
+        );
+
+        let bytes = serde_json::to_vec_pretty(&payload)
+            .map_err(|e| format!("Failed to serialize stats JSON: {e}"))?;
+        fs::write(&path, bytes).map_err(|e| format!("Failed to write stats JSON: {e}"))?;
+
+        Ok(path)
+    }
+}
+
+fn sanitize_filename_suffix(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let mut out: String = trimmed.chars().take(64).collect();
+    if out.starts_with('.') {
+        out = out.trim_start_matches('.').to_string();
+    }
+
+    out.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn find_log_dir() -> PathBuf {
+    // Best-effort: find the ALVR repo root (Cargo.toml + alvr/ folder) by walking up.
+    // Fallback: CWD/logFiles.
+    let start_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    let mut dir = start_dir;
+    for _ in 0..10 {
+        if dir.join("Cargo.toml").is_file() && dir.join("alvr").is_dir() {
+            return dir.join("logFiles");
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    PathBuf::from("logFiles")
+}
+
+fn median_f64(values: impl Iterator<Item = f64>) -> Option<f64> {
+    let mut v: Vec<f64> = values.filter(|x| x.is_finite()).collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    let mid = v.len() / 2;
+    if v.len() % 2 == 1 {
+        Some(v[mid])
+    } else {
+        Some((v[mid - 1] + v[mid]) * 0.5)
+    }
+}
+
+fn median_u64(values: impl Iterator<Item = u64>) -> Option<u64> {
+    let mut v: Vec<u64> = values.collect();
+    if v.is_empty() {
+        return None;
+    }
+    v.sort_unstable();
+    let mid = v.len() / 2;
+    if v.len() % 2 == 1 {
+        Some(v[mid])
+    } else {
+        Some((v[mid - 1] / 2) + (v[mid] / 2))
+    }
+}
+
+fn now_unix_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+fn build_stats_median_json(
+    graph: &[GraphStatistics],
+    summary: &[StatisticsSummary],
+    suffix: &str,
+) -> serde_json::Value {
+    // GraphStatistics latency fields are in seconds; dashboard displays them in ms.
+    let s_to_ms = |x: f32| (x as f64) * 1000.0;
+
+    let mtp_ms = median_f64(graph.iter().map(|s| s_to_ms(s.total_pipeline_latency_s)));
+    let alvr_ms = median_f64(graph.iter().map(|s| {
+        s_to_ms(
+            s.game_time_s
+                + s.server_compositor_s
+                + s.encoder_s
+                + s.network_s
+                + s.decoder_s
+                + s.decoder_queue_s
+                + s.client_compositor_s,
+        )
+    }));
+
+    json!({
+        "schema": 1,
+        "created_unix_ms": now_unix_ms(),
+        "filename_suffix": suffix,
+        "sample_counts": {
+            "graph_statistics": graph.len(),
+            "statistics_summary": summary.len(),
+        },
+        "medians": {
+            "graph_statistics": {
+                "latency_ms": {
+                    "motion_to_photon": mtp_ms,
+                    "alvr": alvr_ms,
+                    "game_render": median_f64(graph.iter().map(|s| s_to_ms(s.game_time_s))),
+                    "server_compositor": median_f64(graph.iter().map(|s| s_to_ms(s.server_compositor_s))),
+                    "encoder": median_f64(graph.iter().map(|s| s_to_ms(s.encoder_s))),
+                    "network": median_f64(graph.iter().map(|s| s_to_ms(s.network_s))),
+                    "decoder": median_f64(graph.iter().map(|s| s_to_ms(s.decoder_s))),
+                    "decoder_queue": median_f64(graph.iter().map(|s| s_to_ms(s.decoder_queue_s))),
+                    "client_compositor": median_f64(graph.iter().map(|s| s_to_ms(s.client_compositor_s))),
+                    "vsync_queue": median_f64(graph.iter().map(|s| s_to_ms(s.vsync_queue_s))),
+                },
+                "fps": {
+                    "server": median_f64(graph.iter().map(|s| s.server_fps as f64)),
+                    "client": median_f64(graph.iter().map(|s| s.client_fps as f64)),
+                },
+                "throughput_mbps": {
+                    "throughput": median_f64(graph.iter().map(|s| (s.throughput_bps as f64) / 1_000_000.0)),
+                },
+                "bitrate_mbps": {
+                    "bitrate": median_f64(graph.iter().map(|s| (s.bitrate_bps as f64) / 1_000_000.0)),
+                },
+                "bitrate_directives": {
+                    "scaled_calculated_throughput_mbps": median_f64(graph.iter().filter_map(|s| s.bitrate_directives.scaled_calculated_throughput_bps.map(|v| (v as f64) / 1_000_000.0))),
+                    "decoder_latency_limiter_mbps": median_f64(graph.iter().filter_map(|s| s.bitrate_directives.decoder_latency_limiter_bps.map(|v| (v as f64) / 1_000_000.0))),
+                    "network_latency_limiter_mbps": median_f64(graph.iter().filter_map(|s| s.bitrate_directives.network_latency_limiter_bps.map(|v| (v as f64) / 1_000_000.0))),
+                    "encoder_latency_limiter_mbps": median_f64(graph.iter().filter_map(|s| s.bitrate_directives.encoder_latency_limiter_bps.map(|v| (v as f64) / 1_000_000.0))),
+                    "manual_max_throughput_mbps": median_f64(graph.iter().filter_map(|s| s.bitrate_directives.manual_max_throughput_bps.map(|v| (v as f64) / 1_000_000.0))),
+                    "manual_min_throughput_mbps": median_f64(graph.iter().filter_map(|s| s.bitrate_directives.manual_min_throughput_bps.map(|v| (v as f64) / 1_000_000.0))),
+                    "requested_bitrate_mbps": median_f64(graph.iter().map(|s| (s.bitrate_directives.requested_bitrate_bps as f64) / 1_000_000.0)),
+                },
+            },
+            "statistics_summary": {
+                "video": {
+                    "packets_total": median_u64(summary.iter().map(|s| s.video_packets_total as u64)),
+                    "packets_per_sec": median_u64(summary.iter().map(|s| s.video_packets_per_sec as u64)),
+                    "mbytes_total": median_u64(summary.iter().map(|s| s.video_mbytes_total as u64)),
+                    "mbits_per_sec": median_f64(summary.iter().map(|s| s.video_mbits_per_sec as f64)),
+                },
+                "latency_ms": {
+                    "total": median_f64(summary.iter().map(|s| s.total_latency_ms as f64)),
+                    "network": median_f64(summary.iter().map(|s| s.network_latency_ms as f64)),
+                    "encode": median_f64(summary.iter().map(|s| s.encode_latency_ms as f64)),
+                    "decode": median_f64(summary.iter().map(|s| s.decode_latency_ms as f64)),
+                },
+                "fps": {
+                    "server": median_f64(summary.iter().map(|s| s.server_fps as f64)),
+                    "client": median_f64(summary.iter().map(|s| s.client_fps as f64)),
+                },
+                "battery": {
+                    "hmd": median_f64(summary.iter().map(|s| s.battery_hmd as f64)),
+                    "hmd_plugged_true_fraction": if summary.is_empty() {
+                        None
+                    } else {
+                        Some(summary.iter().filter(|s| s.hmd_plugged).count() as f64 / summary.len() as f64)
+                    },
+                },
+            },
+        }
+    })
 }
 
 impl StatisticsTab {
@@ -31,14 +259,29 @@ impl StatisticsTab {
                 .into_iter()
                 .collect(),
             last_statistics_summary: None,
+            recording: RecordingState::default(),
         }
     }
 
+    pub fn start_recording(&mut self, filename_suffix: String) {
+        self.recording.start(filename_suffix);
+    }
+
+    pub fn stop_recording_and_save_medians(&mut self) -> Result<PathBuf, String> {
+        self.recording.stop_and_write_json()
+    }
+
     pub fn update_statistics(&mut self, statistics: StatisticsSummary) {
+        if self.recording.active {
+            self.recording.summary_samples.push(statistics.clone());
+        }
         self.last_statistics_summary = Some(statistics);
     }
 
     pub fn update_graph_statistics(&mut self, statistics: GraphStatistics) {
+        if self.recording.active {
+            self.recording.graph_samples.push(statistics.clone());
+        }
         self.history.pop_front();
         self.history.push_back(statistics);
     }

@@ -57,6 +57,7 @@ public:
         vr::HmdMatrix34_t poses[],
         int layerCount,
         bool recentering,
+        uint64_t targetTimestampNs,
         const std::string& message,
         const std::string& debugText
     );
@@ -67,7 +68,8 @@ public:
 private:
     std::shared_ptr<CD3DRender> m_pD3DRender;
     ComPtr<ID3D11Texture2D> m_pStagingTexture;
-
+    ComPtr<ID3D11ShaderResourceView> m_pCompositionTextureSRV;
+    
     ComPtr<ID3D11VertexShader> m_pVertexShader;
     ComPtr<ID3D11PixelShader> m_pPixelShader;
 

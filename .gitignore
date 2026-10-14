@@ -51,6 +51,9 @@ wix/harvested.wxs
 /build/
 dist
 
+# log files
+/logFiles/
+
 .vscode/
 .DS_Store
 .ccls-cache
