@@ -12,7 +12,7 @@ The original ALVR landing page is preserved in the [wiki](wiki/ALVR-README.md). 
 
 This project is a **research prototype / experimental release** implementing the methods presented in our ACM Multimedia papers:
 
-- **2026:** *Latency-Driven Optimization for Foveation in Remote Rendered VR* (paper link forthcoming).
+- **2026:** [*Latency-Driven Optimization for Foveation in Remote Rendered VR*](https://doi.org/10.1145/3767308.3835889).
 - **2025:** [*Gaze-Adaptive Foveation for Remote Rendered VR*](https://doi.org/10.1145/3746027.3755620).
 
 Remote rendering brings high-fidelity VR to standalone headsets by offloading graphics workloads to a PC or remote server. Streaming those images, however, introduces bandwidth and latency challenges. Our work addresses these challenges through gaze-adaptive spatial compression and explicit compensation for latency.
@@ -229,6 +229,15 @@ For dashboard-only development, use `cargo build -p alvr_dashboard`. Use `build-
 If this project supports your research, please cite the relevant paper. The available citation is:
 
 ```bibtex
+@inproceedings{widagdo2026latency,
+  title={Latency-Driven Optimization for Foveation in Remote Rendered VR},
+  author={Widagdo, Adhi and K{\"a}m{\"a}r{\"a}inen, Teemu and Kondori, Sam and Sun, Yuan-Chun and Siekkinen, Matti and Hsu, Cheng-Hsin},
+  booktitle={Proceedings of the 34th ACM International Conference on Multimedia},
+  pages={11440--11448},
+  year={2026},
+  doi={10.1145/3767308.3835889}
+}
+
 @inproceedings{widagdo2025gaze,
   title={Gaze-Adaptive Foveation for Remote Rendered VR},
   author={Widagdo, Adhi and K{\"a}m{\"a}r{\"a}inen, Teemu and Alhilal, Ahmad and Siekkinen, Matti and Hsu, Cheng-Hsin},
